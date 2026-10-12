@@ -1,0 +1,50 @@
+name: Build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-windows
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: build (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          cache-on-failure: true
+
+      - run: npm install
+
+      - name: Build Tauri app (portable + NSIS)
+        run: npm run tauri build -- --bundles nsis
+
+      - name: Stage artifacts
+        shell: pwsh
+        run: |
+          $ver = (Get-Content package.json | ConvertFrom-Json).version
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item "src-tauri/target/release/zcode-pool.exe" "out/zcode-pool_${ver}_portable.exe"
+          Copy-Item "src-tauri/target/release/bundle/nsis/*-setup.exe" "out/"
+          Get-ChildItem out | Select-Object Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zcode-pool-windows
+          path: out/*
+          if-no-files-found: error
