@@ -8,7 +8,7 @@ import {
   setMboxRerender, mboxLoad, mboxPage, mboxFilter, mboxToggle, mboxImport,
   mboxRemove, mboxDelete, mboxSelection, mboxVerify, mboxStop, mboxOnOauthDone, mboxRunning, mboxCurrent, mboxStats,
   mboxSelectAll, mboxSelectNone, mboxToggleRow, mboxExport, mboxRetryFailed, mboxDismissResult, mboxUpdateLine, mboxReauth,
-  mboxSkipCurrent,
+  mboxCfCreate, mboxSkipCurrent,
 } from "./mbox.js";
 
 const $app = document.getElementById("app");
@@ -181,6 +181,7 @@ const actions = {
     render();
   },
   async mboxImport() { await mboxImport(); },
+  async mboxCfCreate() { await mboxCfCreate(); },
   async mboxVerify() { await mboxVerify(); },
   async mboxStop() { mboxStop(); },
   async mboxFilter(f) { mboxFilter(f); },
@@ -476,15 +477,42 @@ const actions = {
       toast(state.auth_proxy_on ? t("s.proxyOnToast") : t("s.proxyOffToast"), "ok", t("s.proxyOnDetail"));
     } catch (e) { toast(stripErr(e), "err"); }
   },
-  async saveProxy() {
-    const input = document.querySelector("input.auth-proxy");
-    if (!input) return;
-    try {
-      await invoke("set_auth_proxy", { on: state.auth_proxy_on, url: input.value.trim() });
-      await refresh(); render();
-      toast(t("s.proxySaved"), "ok", state.auth_proxy_on ? t("s.proxySavedOn") : t("s.proxySavedOff"));
-    } catch (e) { toast(stripErr(e), "err"); }
-  },
+    async saveProxy() {
+      const input = document.querySelector("input.auth-proxy");
+      if (!input) return;
+      try {
+        await invoke("set_auth_proxy", { on: state.auth_proxy_on, url: input.value.trim() });
+        await refresh(); render();
+        toast(t("s.proxySaved"), "ok", state.auth_proxy_on ? t("s.proxySavedOn") : t("s.proxySavedOff"));
+      } catch (e) { toast(stripErr(e), "err"); }
+    },
+    async saveCf() {
+      const base = document.querySelector("input.cf-base");
+      const pass = document.querySelector("input.cf-pass");
+      const dom = document.querySelector("input.cf-domain");
+      if (!base || !dom) return;
+      const args = { baseUrl: base.value.trim(), domain: dom.value.trim() };
+      // 密码框永不回显：留空 = 保持原样；要停用就把服务地址清空
+      const pw = (pass?.value || "").trim();
+      if (pw) args.adminPassword = pw;
+      try {
+        await invoke("set_cf_settings", args);
+        if (pass) pass.value = "";
+        await refresh(); render();
+        toast(t("s.cfSaved"), "ok");
+      } catch (e) { toast(stripErr(e), "err"); }
+    },
+    async testCf() {
+      const val = (sel) => (document.querySelector(sel)?.value || "").trim() || null;
+      try {
+        const r = await invoke("cf_test", {
+          baseUrl: val("input.cf-base"),
+          adminPassword: val("input.cf-pass"),
+          domain: val("input.cf-domain"),
+        });
+        toast(t("s.cfOk", { n: (r && r.visible) || 0 }), "ok");
+      } catch (e) { toast(t("s.cfFail"), "err", stripErr(e)); }
+    },
   acctQuota(id) {
     const dueAt = quotaDue[id];
     loadAcctQuota(id).then(() => {
@@ -1243,6 +1271,26 @@ function settingsView(s) {
         </div>
       </div>
       <div class="grp">
+        <div class="gh">${t("s.cfLabel")}${s.cf_configured ? `<span class="chip ok" style="margin-left:8px">${t("s.cfReady")}</span>` : ""}</div>
+        <div class="gb">
+          <div class="line">
+            <input class="inp mono cf-base" type="text" value="${esc(s.cf_base_url || "")}"
+              placeholder="${t("s.cfBasePh")}" keydown="onCfKey(event)">
+          </div>
+          <div class="line" style="margin-top:10px">
+            <input class="inp mono cf-pass" type="password" value="" autocomplete="off"
+              placeholder="${s.cf_configured ? t("s.cfPassSavedPh") : t("s.cfPassPh")}" keydown="onCfKey(event)">
+          </div>
+          <div class="line" style="margin-top:10px">
+            <input class="inp mono cf-domain" type="text" value="${esc(s.cf_domain || "")}"
+              placeholder="${t("s.cfDomainPh")}" keydown="onCfKey(event)">
+            <button class="btn g" click="actions.saveCf()">${t("common.save")}</button>
+            <button class="btn g" click="actions.testCf()">${t("s.cfTest")}</button>
+          </div>
+          <div class="hint" style="margin-top:12px">${t("s.cfHint")}</div>
+        </div>
+      </div>
+      <div class="grp">
         <div class="gh">${t("s.pathLabel")}</div>
         <div class="gb">
           <div class="line">
@@ -1419,6 +1467,7 @@ function render() {
 window.actions = actions;
 window.onPathKey = (e) => { if (e.key === "Enter") actions.savePath(); };
 window.onProxyKey = (e) => { if (e.key === "Enter") actions.saveProxy(); };
+window.onCfKey = (e) => { if (e.key === "Enter") actions.saveCf(); };
 window.onRenameKey = (e, id) => {
   if (e.key === "Enter") actions.doRename(id);
   if (e.key === "Escape") actions.cancelRename();

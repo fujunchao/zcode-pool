@@ -52,6 +52,12 @@ function badge(a) {
   return `<span class="chip ${k}"${note}>${esc(tr("mb.status", key))}</span>`;
 }
 
+// 邮箱来源标记：只标 cf（现场建的临时地址），Outlook 是默认来源不标，免得列表变花。
+function kindChip(a) {
+  if (a.kind !== "cf") return "";
+  return `<span class="chip acc" title="${esc(t("mb.cfKindTip"))}">${esc(t("mb.cfKind"))}</span>`;
+}
+
 export function mboxPage() {
   const b = M.batch;
   const verified = M.list.filter((a) => a.status === "verified").length;
@@ -72,6 +78,7 @@ export function mboxPage() {
           ${b.running ? "disabled" : ""}>
         <span class="mail" title="${esc(a.email)}">${esc(a.email)}</span>
         ${badge(a)}
+        ${kindChip(a)}
         <span class="when">${esc(a.verified_at || "")}</span>
         ${a.status === "invalid" ? `<button class="btn sm mb-reauth" data-reauth="${esc(a.email)}">${esc(t("mb.reauth"))}</button>` : ""}
         <button class="iconbtn mb-edit" data-edit="${esc(a.email)}" title="${esc(t("mb.update"))}" ${b.running ? "disabled" : ""}>${ic("pen", 14)}</button>
@@ -107,6 +114,10 @@ export function mboxPage() {
     </dl>
     <section class="toolbar">
       <button class="btn p" click="actions.mboxImport()" ${b.running ? "disabled" : ""}>${ic("import", 15)} ${t("mb.import")}</button>
+      <select class="sel mb-cf-n" id="mb-cf-n" title="${esc(t("mb.cfCount"))}" aria-label="${esc(t("mb.cfCount"))}" ${b.running ? "disabled" : ""}>
+        ${[1, 3, 5, 10].map((n) => `<option value="${n}">${n}</option>`).join("")}
+      </select>
+      <button class="btn" click="actions.mboxCfCreate()" title="${esc(t("mb.cfCreateTip"))}" ${b.running ? "disabled" : ""}>${ic("mail", 14)} ${t("mb.cfCreate")}</button>
       <button class="btn" click="actions.mboxExport()" ${M.list.length && !b.running ? "" : "disabled"}>${ic("export", 14)} ${t("mb.export")}</button>
       <button class="btn" click="actions.mboxVerify()" ${!M.sel.size || b.running ? "disabled" : ""}>${ic("play", 14)} ${t("mb.verify")}${M.sel.size ? ` (${M.sel.size})` : ""}</button>
       <button class="btn" click="actions.mboxStop()" ${b.running ? "" : "disabled"}>${ic("power", 14)} ${t("mb.stop")}</button>
@@ -197,6 +208,28 @@ export async function mboxImport() {
     if (r.added > 0) toast(t("mb.importOk", { added: r.added, skipped: r.skipped }), "ok");
     else if (r.parsed === 0) toast(t("mb.importEmpty"), "err");
     else toast(t("mb.importDup", { skipped: r.skipped }), "warn");
+  } catch (e) {
+    toast(String(e).replace(/^[a-z_]+:/, ""), "err");
+  }
+}
+
+/** 现场建临时地址（cloudflare_temp_email）并直接入库：建完就能勾选去跑注册。 */
+export async function mboxCfCreate() {
+  if (M.batch.running) return;
+  const n = Number(document.querySelector("#mb-cf-n")?.value || 1) || 1;
+  try {
+    const r = await invoke("cf_create", { count: n });
+    const created = (r && r.created) || [];
+    const errors = (r && r.errors) || [];
+    await mboxLoad();
+    rerender();
+    if (created.length) {
+      const head = t("mb.cfCreated", { n: created.length }) + (errors.length ? ` · ${t("mb.cfPartial", { n: errors.length })}` : "");
+      const detail = [created.map((c) => c.email).join("\n"), errors[0] || ""].filter(Boolean).join("\n");
+      toast(head, errors.length ? "warn" : "ok", detail);
+    } else {
+      toast(t("mb.cfNone"), "err", errors[0] || t("mb.cfNoConfig"));
+    }
   } catch (e) {
     toast(String(e).replace(/^[a-z_]+:/, ""), "err");
   }
