@@ -13,11 +13,11 @@
 //!
 //! created_at 形如 `2026-10-12 15:03:36`，是 **UTC**。
 
-#![allow(dead_code)] // 临时：reg_fetch_link 接上来之后删掉这行
+#![allow(dead_code)] // `delete_address` 暂无调用点（保留：将来做「从邮箱库移除即清理远端地址」）
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::time::Duration;
 
 /// 只认这个域下的链接（与 Outlook 那条线的 graph.rs 保持一致）
