@@ -158,7 +158,34 @@ pub struct ImportResult {
     pub total_parsed: usize,
 }
 
-pub fn import(accounts: &mut Vec<MailAccount>, raw: &str, now: String) -> ImportResult {
+/// 按地址推断邮箱来源：与「临时邮箱服务」配置的收信域名同域（含其子域）→ cf，否则 outlook。
+///
+/// 为什么需要：txt 行里只有 `email----password----client_id----refresh_token`，没有来源字段，
+/// 而手工维护（导入 txt / 更新一行）恰恰是 cf 地址进入邮箱库的主要路径 —— 不推断的话它们会被
+/// 当成 Outlook 去 Graph 取信，永远取不到验证链接。域名是配置里现成的信息，不必让用户再选一次。
+pub fn infer_kind(email: &str, cf_domain: Option<&str>) -> &'static str {
+    let dom = cf_domain
+        .unwrap_or("")
+        .trim()
+        .trim_start_matches('@')
+        .to_ascii_lowercase();
+    if dom.is_empty() {
+        return KIND_OUTLOOK;
+    }
+    match email.rsplit_once('@') {
+        Some((_, d)) => {
+            let d = d.to_ascii_lowercase();
+            if d == dom || d.ends_with(&format!(".{dom}")) {
+                KIND_CF
+            } else {
+                KIND_OUTLOOK
+            }
+        }
+        None => KIND_OUTLOOK,
+    }
+}
+
+pub fn import(accounts: &mut Vec<MailAccount>, raw: &str, now: String, cf_domain: Option<&str>) -> ImportResult {
     let parsed = parse_lines(raw);
     let mut r = ImportResult {
         total_parsed: parsed.len(),
@@ -169,6 +196,7 @@ pub fn import(accounts: &mut Vec<MailAccount>, raw: &str, now: String) -> Import
             r.skipped += 1;
             continue;
         }
+        let kind = infer_kind(&email, cf_domain).to_string();
         accounts.push(MailAccount {
             email,
             password,
@@ -178,7 +206,7 @@ pub fn import(accounts: &mut Vec<MailAccount>, raw: &str, now: String) -> Import
             verified_at: None,
             note: None,
             created_at: now.clone(),
-            kind: KIND_OUTLOOK.to_string(),
+            kind,
             remote_id: None,
         });
         r.added += 1;
@@ -225,12 +253,34 @@ mod tests {
             kind: KIND_OUTLOOK.into(),
             remote_id: None,
         }];
-        let r = import(&mut acc, "a@b.com----new----c----r\nc@d.com----p----c----r\n", "now".into());
+        let r = import(&mut acc, "a@b.com----new----c----r\nc@d.com----p----c----r\n", "now".into(), None);
         assert_eq!(r.added, 1);
         assert_eq!(r.skipped, 1);
         assert_eq!(acc.len(), 2);
         assert_eq!(acc[0].password, "old", "已存在的不能被覆盖");
         assert_eq!(acc[1].status, STATUS_NEW);
+        assert_eq!(acc[1].kind, KIND_OUTLOOK, "没配收信域名时一律 outlook");
+    }
+
+    #[test]
+    fn import_marks_cf_addresses_by_domain() {
+        // 手工导入是 cf 地址进库的主要路径：域名对得上就必须标成 cf，否则会去 Graph 白跑
+        let mut acc: Vec<MailAccount> = vec![];
+        let raw = "u1@mail.example.com----p----c----r\nu2@em.example.com----p----c----r\nu3@other.com----p----c----r\n";
+        let r = import(&mut acc, raw, "now".into(), Some("mail.example.com"));
+        assert_eq!(r.added, 3);
+        assert_eq!(acc[0].kind, KIND_CF);
+        assert_eq!(acc[1].kind, KIND_OUTLOOK, "同 apex 的子域但不匹配收信域名");
+        assert_eq!(acc[2].kind, KIND_OUTLOOK);
+
+        // 配的是 apex 域名时，其子域也算同一服务
+        let mut acc2: Vec<MailAccount> = vec![];
+        import(&mut acc2, "u4@mail.example.com----p----c----r\n", "now".into(), Some("example.com"));
+        assert_eq!(acc2[0].kind, KIND_CF);
+
+        // 域名大小写 / 带 @ 前缀 / 带空格都要认；后缀匹配必须卡在 `.` 上（notexample.com 不算）
+        assert_eq!(infer_kind("u5@Mail.Example.COM", Some(" @mail.example.com ")), KIND_CF);
+        assert_eq!(infer_kind("u6@notexample.com", Some("example.com")), KIND_OUTLOOK);
     }
 
     #[test]

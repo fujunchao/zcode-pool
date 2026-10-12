@@ -745,8 +745,9 @@ async fn pool_import_pick(app: AppHandle) -> Result<Value, String> {
 
     let _guard = store_guard();
     let root = Paths::detect().store_dir();
+    let cf_domain = load_settings(&Paths::detect()).cf_domain;
     let mut accounts = pool::load(&root);
-    let r = pool::import(&mut accounts, &raw, store::now_ts());
+    let r = pool::import(&mut accounts, &raw, store::now_ts(), cf_domain.as_deref());
     pool::save(&root, &accounts)?;
     drop(_guard);
 
@@ -847,13 +848,19 @@ async fn pool_upsert(app: AppHandle, line: String) -> Result<Value, String> {
     };
     let _guard = store_guard();
     let root = Paths::detect().store_dir();
+    let cf_domain = load_settings(&Paths::detect()).cf_domain;
     let mut accounts = pool::load(&root);
+    let hint = pool::infer_kind(&email, cf_domain.as_deref());
     let updated = if let Some(a) = pool::find_mut(&mut accounts, &email) {
         a.password = password;
         a.client_id = client_id;
         a.refresh_token = refresh_token;
         a.status = pool::STATUS_NEW.to_string();
         a.note = None;
+        // 只做单向修正（outlook → cf）：域名对得上就说明这行是临时邮箱地址
+        if hint == pool::KIND_CF {
+            a.kind = pool::KIND_CF.to_string();
+        }
         true
     } else {
         accounts.push(pool::MailAccount {
@@ -865,7 +872,7 @@ async fn pool_upsert(app: AppHandle, line: String) -> Result<Value, String> {
             verified_at: None,
             note: None,
             created_at: store::now_ts(),
-            kind: pool::KIND_OUTLOOK.to_string(),
+            kind: hint.to_string(),
             remote_id: None,
         });
         false

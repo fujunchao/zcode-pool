@@ -2578,10 +2578,11 @@ fn handle(mut req: tiny_http::Request, gw: &Gateway) -> Result<(), String> {
             let v: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
             let raw = v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
             let root = paths.store_dir();
+            let cf_domain = store::load_settings(&paths).cf_domain;
             let r = {
                 let _g = crate::store_guard();
                 let mut accounts = crate::pool::load(&root);
-                let rep = crate::pool::import(&mut accounts, &raw, store::now_ts());
+                let rep = crate::pool::import(&mut accounts, &raw, store::now_ts(), cf_domain.as_deref());
                 match crate::pool::save(&root, &accounts) { Ok(()) => Ok(rep), Err(e) => Err(e) }
             };
             return match r {
@@ -2670,15 +2671,21 @@ fn handle(mut req: tiny_http::Request, gw: &Gateway) -> Result<(), String> {
                 return reply_json(req, 400, &json!({ "error": "行格式不对，应为 email----password----client_id----refresh_token" }));
             };
             let root = paths.store_dir();
+            let cf_domain = store::load_settings(&paths).cf_domain;
             let r = {
                 let _g = crate::store_guard();
                 let mut accounts = crate::pool::load(&root);
+                let hint = crate::pool::infer_kind(&email, cf_domain.as_deref());
                 let updated = if let Some(a) = crate::pool::find_mut(&mut accounts, &email) {
                     a.password = password;
                     a.client_id = client_id;
                     a.refresh_token = refresh_token;
                     a.status = crate::pool::STATUS_NEW.to_string();
                     a.note = None;
+                    // 只做单向修正（outlook → cf）：域名对得上就说明这行是临时邮箱地址
+                    if hint == crate::pool::KIND_CF {
+                        a.kind = crate::pool::KIND_CF.to_string();
+                    }
                     true
                 } else {
                     accounts.push(crate::pool::MailAccount {
@@ -2690,7 +2697,7 @@ fn handle(mut req: tiny_http::Request, gw: &Gateway) -> Result<(), String> {
                         verified_at: None,
                         note: None,
                         created_at: store::now_ts(),
-                        kind: crate::pool::KIND_OUTLOOK.to_string(),
+                        kind: hint.to_string(),
                         remote_id: None,
                     });
                     false
