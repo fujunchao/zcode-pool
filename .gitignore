@@ -27,6 +27,8 @@ desktop.ini
 # Local agent config
 .zcode/
 .claude/
+.workbuddy/
+.zcode-pool/
 
 # Misc
 nul
