@@ -265,6 +265,32 @@ pub fn run(args: &[String]) -> (String, i32) {
                 Err(e) => return (err(&e), 1),
             }
         }
+        "cf-test" => {
+            let Some(cfg) = load_settings(&paths).cf_cfg() else {
+                return (err(&crate::i18n::tr("err.cf.noconfig")), 1);
+            };
+            match crate::cfmail::probe(&cfg) {
+                Ok(n) => ok(json!({ "visible": n })),
+                Err(e) => return (err(&e), 1),
+            }
+        }
+        "cf-create" => {
+            let n = flag(rest, "--count").and_then(|v| v.parse::<usize>().ok()).unwrap_or(1);
+            match crate::cf_create_into_pool(&paths, n) {
+                Ok((created, errors)) => ok(json!({ "created": created, "errors": errors })),
+                Err(e) => return (err(&e), 1),
+            }
+        }
+        "cf-links" => {
+            let Some(email) = flag(rest, "--email") else {
+                return (err(&crate::i18n::tr("cli.usage.cf_links")), 2);
+            };
+            let since = flag(rest, "--since").and_then(|v| v.parse::<i64>().ok());
+            match crate::cf_fetch_links(&paths, &email, since) {
+                Ok(v) => ok(v),
+                Err(e) => return (err(&e), 1),
+            }
+        }
         other => return (err(&crate::i18n::trf("cli.unknown_cmd", &[("cmd", other)])), 2),
     };
     (out, 0)

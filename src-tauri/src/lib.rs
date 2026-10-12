@@ -644,11 +644,19 @@ async fn reg_fetch_link(
     // 临时邮箱源（cloudflare_temp_email）：走管理接口取信，自己解码 raw MIME 抠链接
     if acc.is_cf() {
         let paths = Paths::detect();
-        let cfg = store::load_settings(&paths)
-            .cf_cfg()
-            .ok_or_else(|| i18n::tr("err.cf.noconfig").to_string())?;
-        let mails = match cfmail::fetch_mails(&cfg, &acc.email, 10) {
-            Ok(v) => v,
+        match cf_fetch_links(&paths, &acc.email, since) {
+            Ok(v) => {
+                if !cur_flow.is_empty() {
+                    let scanned = v.get("scanned").and_then(|x| x.as_u64()).unwrap_or(0);
+                    let n = v.get("links").and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(0);
+                    flowlog::log(
+                        &cur_flow,
+                        "link-fetch",
+                        &format!("cf address={} scanned={scanned} links={n}", acc.email),
+                    );
+                }
+                return Ok(v);
+            }
             Err(e) => {
                 // 与 Graph 分支对称：失败也留痕，便于回头查是配置错还是服务端问题
                 if !cur_flow.is_empty() {
@@ -657,7 +665,8 @@ async fn reg_fetch_link(
                 }
                 return Err(e);
             }
-        };
+        }
+    }
         let (links, scanned) = cfmail::links_from_mails(&mails, since);
         if !cur_flow.is_empty() {
             flowlog::log(
@@ -968,17 +977,36 @@ async fn cf_test(
     Ok(json!({ "ok": true, "visible": n }))
 }
 
-/// 现场创建 N 个临时邮箱地址并写进邮箱库（kind=cf；password 是给 z.ai 注册用的随机串）
-#[tauri::command]
-async fn cf_create(app: AppHandle, count: Option<usize>) -> Result<Value, String> {
-    let _guard = store_guard();
-    let paths = Paths::detect();
-    let cfg = load_settings(&paths)
+/// 现场取信 + 抠验证链接（GUI 的 reg_fetch_link 与 `--cli cf-links` 共用同一实现）
+pub(crate) fn cf_fetch_links(paths: &Paths, email: &str, since: Option<i64>) -> Result<Value, String> {
+    let cfg = load_settings(paths)
+        .cf_cfg()
+        .ok_or_else(|| i18n::tr("err.cf.noconfig").to_string())?;
+    let mails = cfmail::fetch_mails(&cfg, email, 10)?;
+    let (links, scanned) = cfmail::links_from_mails(&mails, since);
+    let newest_at = mails
+        .iter()
+        .filter_map(|m| m.created_ms)
+        .max()
+        .and_then(|ms| chrono::DateTime::from_timestamp_millis(ms))
+        .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string());
+    Ok(json!({
+        "links": links,
+        "scanned": scanned,
+        "newestSubject": "",
+        "newestAt": newest_at,
+    }))
+}
+
+/// 现场创建 N 个临时邮箱地址并写进邮箱库（kind=cf；password 是给 z.ai 注册用的随机串）。
+/// GUI 命令与 `--cli cf-create` 共用。
+pub(crate) fn cf_create_into_pool(paths: &Paths, count: usize) -> Result<(Vec<Value>, Vec<String>), String> {
+    let cfg = load_settings(paths)
         .cf_cfg()
         .ok_or_else(|| i18n::tr("err.cf.noconfig").to_string())?;
     let root = paths.store_dir();
     let mut accounts = pool::load(&root);
-    let n = count.unwrap_or(1).clamp(1, 20);
+    let n = count.clamp(1, 20);
     let mut created: Vec<Value> = vec![];
     let mut errors: Vec<String> = vec![];
     for _ in 0..n {
@@ -1006,9 +1034,17 @@ async fn cf_create(app: AppHandle, count: Option<usize>) -> Result<Value, String
             Err(e) => errors.push(format!("{name}: {e}")),
         }
     }
-    let save = if created.is_empty() { Ok(()) } else { pool::save(&root, &accounts) };
+    if !created.is_empty() {
+        pool::save(&root, &accounts)?;
+    }
+    Ok((created, errors))
+}
+
+#[tauri::command]
+async fn cf_create(app: AppHandle, count: Option<usize>) -> Result<Value, String> {
+    let _guard = store_guard();
+    let (created, errors) = cf_create_into_pool(&Paths::detect(), count.unwrap_or(1))?;
     drop(_guard);
-    save?;
     let _ = app.emit("pool-changed", ());
     Ok(json!({ "created": created, "errors": errors }))
 }

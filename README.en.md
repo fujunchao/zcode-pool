@@ -75,6 +75,10 @@ output and collapsible reasoning.
 ### Mailbox pool
 
 - Imports `email----password----client_id----refresh_token` files and reads Outlook / Hotmail verification mail.
+- Optionally adds a self-hosted [cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email) as a second
+  mail source: set the base URL and admin password under Settings → Temp mail service, then use "New address" in the mailbox
+  pool to create an address on the spot and store it. Verification links are fetched from that service (with automatic
+  base64 / quoted-printable and soft-line-break decoding) — no Outlook account required.
 - Runs signup, mail pickup, verification and authorization in batches. The slider CAPTCHA is completed manually.
 - Supports re-authorization, credential updates and status filtering.
 

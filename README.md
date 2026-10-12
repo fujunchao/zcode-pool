@@ -68,6 +68,9 @@ Z·POOL 是一个基于 Tauri 2 的桌面工具，把 ZCode / Z.ai 的多账号�
 ### 邮箱池
 
 - 导入 `email----password----client_id----refresh_token` 格式的账号文件，读取 Outlook / Hotmail 验证邮件。
+- 可选接入自部署的 [cloudflare_temp_email](https://github.com/dreamhunter2333/cloudflare_temp_email) 作为第二邮箱源：
+  在「设置 → 临时邮箱服务」填服务地址与管理员密码后，邮箱库可用「现场建址」当场创建地址并入库，
+  验证链接由该服务取回（自动解码 base64 / quoted-printable 与软换行）——无需 Outlook 账号。
 - 批量完成注册、取信、验证与授权流程；滑块验证码需手动完成。
 - 支持重新授权、更新凭据、按状态筛选。
 
