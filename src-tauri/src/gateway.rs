@@ -2737,6 +2737,16 @@ fn handle(mut req: tiny_http::Request, gw: &Gateway) -> Result<(), String> {
                 Some(a) => a.clone(),
                 None => return reply_json(req, 404, &json!({ "error": "邮箱不在库里" })),
             };
+            // 临时邮箱源：走它自己的接口取信，字段名与 Graph 通道保持一致（控制台前端不用改）
+            if acc.is_cf() {
+                let Some(cfg) = store::load_settings(&paths).cf_cfg() else {
+                    return reply_json(req, 400, &json!({ "error": crate::i18n::tr("err.cf.noconfig") }));
+                };
+                return match crate::cfmail::fetch_summaries(&cfg, &acc.email, top) {
+                    Ok(list) => reply_json(req, 200, &json!({ "messages": list, "count": list.len() })),
+                    Err(e) => reply_json(req, 400, &json!({ "error": e })),
+                };
+            }
             let (msgs, new_rt) = match crate::graph::fetch_messages(&acc.client_id, &acc.refresh_token, top) {
                 Ok(v) => v,
                 Err(e) => {

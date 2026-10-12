@@ -226,8 +226,76 @@ pub fn links_from_mails(mails: &[RawMail], since_ms: Option<i64>) -> (Vec<String
     (verify, scanned)
 }
 
-// ---------- 原始 MIME 解码 ----------
+/// 给控制台「查看邮件」用的摘要：字段名与 Graph 通道对齐
+/// （`messages[].{id,subject,from,receivedAt,preview,text,links}`），控制台前端不用改就能显示临时邮箱的邮件。
+pub fn fetch_summaries(cfg: &CfCfg, address: &str, limit: usize) -> Result<Vec<Value>, String> {
+    let mails = fetch_mails(cfg, address, limit)?;
+    Ok(mails.iter().map(summary_of).collect())
+}
 
+/// 单封邮件的摘要（与 Graph 通道同形状）。抽出来是为了能脱离网络单测。
+fn summary_of(m: &RawMail) -> Value {
+    let (hd, _) = split_hb(&m.raw);
+    let hs = parse_headers(hd);
+    let subject = hget(&hs, "subject").map(decode_rfc2047).unwrap_or_default();
+    let from = hget(&hs, "from").map(decode_rfc2047).unwrap_or_default();
+    let mut texts: Vec<String> = vec![];
+    walk(&m.raw, 0, &mut texts);
+    let body = texts.join("\n").trim().to_string();
+    let preview: String = body.chars().take(200).collect();
+    let received = m
+        .created_ms
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|d| d.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .unwrap_or_default();
+    json!({
+        "id": m.id,
+        "subject": subject,
+        "from": from,
+        "receivedAt": received,
+        "preview": preview,
+        "text": body,
+        "body": body,
+        "links": extract_links(&m.raw),
+    })
+}
+
+/// 解 RFC2047 编码字（`=?utf-8?b?…?=` / `=?utf-8?q?…?=`）——真实邮件里 Subject 就长这样
+/// （`=?utf-8?b?6aqM6K+B5oKo55qE55S15a2Q6YKu566x?=` = 「验证您的电子邮箱」）。
+/// 解不开的整段原样保留，别把信息弄丢。
+fn decode_rfc2047(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(start) = rest.find("=?") {
+        let Some(rel_end) = rest[start + 2..].find("?=") else {
+            break;
+        };
+        let end = start + 2 + rel_end;
+        let parts: Vec<&str> = rest[start + 2..end].splitn(3, '?').collect();
+        let decoded = if parts.len() == 3 {
+            match parts[1].to_ascii_lowercase().as_str() {
+                "b" => B64
+                    .decode(parts[2].as_bytes())
+                    .ok()
+                    .map(|b| String::from_utf8_lossy(&b).into_owned()),
+                "q" => Some(decode_qp(&parts[2].replace('_', " "))),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        out.push_str(&rest[..start]);
+        match decoded {
+            Some(d) => out.push_str(&d),
+            None => out.push_str(&rest[start..end + 2]),
+        }
+        rest = &rest[end + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
+// ---------- 原始 MIME 解码 ----------
 /// 从 raw MIME 里提取 chat.z.ai 链接（解码 base64 / quoted-printable / 折行头）。
 pub fn extract_links(raw: &str) -> Vec<String> {
     let mut texts: Vec<String> = vec![];
@@ -528,6 +596,43 @@ https://chat.z.ai/auth/verify_email?token=verify-soft=\r\nbreak&x=1\r\n";
         let no_count: Value = serde_json::from_str(r#"{"results":[{},{}]}"#).unwrap();
         assert_eq!(visible_count(&no_count), 2);
         assert_eq!(visible_count(&Value::Null), 0);
+    }
+
+    /// 真实样本的 Subject 就是 RFC2047 编码字，必须解出来（控制台里要能看懂）
+    #[test]
+    fn rfc2047_subject_decodes() {
+        assert_eq!(decode_rfc2047("=?utf-8?b?6aqM6K+B5oKo55qE55S15a2Q6YKu566x?="), "验证您的电子邮箱");
+        // 编码字与明文混排（真实 #232 就是「=?utf-8?b?…?= Z.ai」这种）
+        assert_eq!(decode_rfc2047("=?utf-8?b?5qyi6L+O5Yqg5YWl?= Z.ai"), "欢迎加入 Z.ai");
+        // Q 编码：下划线代表空格
+        assert_eq!(decode_rfc2047("=?utf-8?Q?=E9=AA=8C=E8=AF=81_ok?="), "验证 ok");
+        // 解不开的整段原样保留，别丢信息
+        assert_eq!(decode_rfc2047("plain subject"), "plain subject");
+        assert_eq!(decode_rfc2047("=?utf-8?b?@@@?="), "=?utf-8?b?@@@?=");
+    }
+
+    /// 控制台「查看邮件」走这条：字段名与 Graph 通道一致，并且要带上抠出来的链接
+    #[test]
+    fn summary_matches_graph_shape() {
+        let raw = format!(
+            "From: Z.ai <noreply@email.z.ai>\r\nSubject: =?utf-8?b?6aqM6K+B5oKo55qE55S15a2Q6YKu566x?=\r\n{}",
+            real_shape_mail()
+        );
+        let m = RawMail {
+            id: 7,
+            raw,
+            created_ms: Some(1_791_817_380_000),
+            source: "noreply@email.z.ai".into(),
+        };
+        let v = summary_of(&m);
+        assert_eq!(v["id"], 7);
+        assert_eq!(v["subject"], "验证您的电子邮箱");
+        assert_eq!(v["from"], "Z.ai <noreply@email.z.ai>");
+        assert_eq!(v["receivedAt"], "2026-10-12T15:03:00Z");
+        let links = v["links"].as_array().unwrap();
+        assert_eq!(links.len(), 1, "links={links:?}");
+        assert_eq!(links[0], FULL_LINK);
+        assert!(v["text"].as_str().unwrap().contains("chat.z.ai"), "正文应含链接");
     }
 
     #[test]
