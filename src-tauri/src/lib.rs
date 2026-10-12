@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod i18n;
+mod cfmail;
 mod claim;
 mod driver;
 mod flowlog;

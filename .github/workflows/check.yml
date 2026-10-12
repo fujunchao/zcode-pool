@@ -1,0 +1,41 @@
+name: Check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: check (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          cache-on-failure: true
+
+      - run: npm install
+
+      - name: i18n 词条检查
+        run: npm run check:i18n
+
+      - name: 前端构建
+        run: npm run build
+
+      - name: cargo test（Rust 单元测试）
+        run: cargo test --manifest-path src-tauri/Cargo.toml
