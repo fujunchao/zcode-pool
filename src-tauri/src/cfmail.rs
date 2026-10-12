@@ -293,7 +293,7 @@ fn walk(part: &str, depth: usize, out: &mut Vec<String>) {
     if ct.trim().to_ascii_lowercase().starts_with("multipart/") {
         if let Some(b) = boundary_of(&ct) {
             for seg in split_parts(body, &b) {
-                walk(seg, depth + 1, out);
+                walk(&seg, depth + 1, out);
             }
             return;
         }
@@ -303,7 +303,8 @@ fn walk(part: &str, depth: usize, out: &mut Vec<String>) {
 }
 
 /// 按 boundary 切段（行首匹配；兼容 \r\n 与 \n）。
-fn split_parts<'a>(body: &'a str, boundary: &str) -> Vec<&'a str> {
+/// 返回所有权切片：内部可能先把 \r\n 规范化到临时缓冲，借出去会触发 E0515。
+fn split_parts(body: &str, boundary: &str) -> Vec<String> {
     let norm_owned;
     let norm: &str = if body.contains("\r\n") {
         norm_owned = body.replace("\r\n", "\n");
@@ -312,8 +313,8 @@ fn split_parts<'a>(body: &'a str, boundary: &str) -> Vec<&'a str> {
         body
     };
     let marker = format!("--{boundary}");
-    let mut segs: Vec<&str> = vec![];
-    let mut rest = match norm.find(&marker) {
+    let mut segs: Vec<String> = vec![];
+    let mut rest: &str = match norm.find(&marker) {
         Some(i) => &norm[i + marker.len()..],
         None => return segs,
     };
@@ -326,11 +327,11 @@ fn split_parts<'a>(body: &'a str, boundary: &str) -> Vec<&'a str> {
         let line_marker = format!("\n{marker}");
         match rest.find(&line_marker) {
             Some(i) => {
-                segs.push(&rest[..i]);
+                segs.push(rest[..i].to_string());
                 rest = &rest[i + 1 + marker.len()..];
             }
             None => {
-                segs.push(rest);
+                segs.push(rest.to_string());
                 break;
             }
         }
