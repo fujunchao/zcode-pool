@@ -439,30 +439,55 @@ fn urlencode(s: &str) -> String {
 mod tests {
     use super::*;
 
-    /// 结构同真实实例：折行 Content-Type（boundary 在第二行）+ QP 编码的 HTML 正文
-    const SAMPLE_QP: &str = "Received: from x\r\n\
-Content-Type: multipart/alternative;\r\n boundary=\"b1_abc\"\r\n\
-MIME-Version: 1.0\r\n\r\n\
+    const FULL_LINK: &str = "https://chat.z.ai/auth/verify_email?token=verify-1314b38449d7fce835389bff2e59e3cc&email=a%40mail.example.com&username=godpej&language=zh";
+
+    /// 真实验证信的结构（取自实例实信，值已匿名化）：
+    /// multipart/alternative；顶层 Content-Type **折行**（boundary 落在第二行）；
+    /// text/plain 走 base64，text/html 走 quoted-printable —— 而 QP 的软换行会把
+    /// URL **拦腰截断**（真实样本里 verify token 与 `godpej` 都被切在中间）。
+    ///
+    /// 注意：发件人保证用软换行（`=` ⏎）折行，所以能拼回整条；若将来遇到
+    /// 硬折行（直接断行、无 `=`）的发件人，这里得另加跨行拼接逻辑。
+    fn real_shape_mail() -> String {
+        let plain = B64.encode(format!("你的验证码是……\r\n{FULL_LINK}\r\n"));
+        format!(
+            "Received: from x\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/alternative;\r\n boundary=\"b1_abc\"\r\n\r\n\
 preamble\r\n\
 --b1_abc\r\n\
 Content-Type: text/plain; charset=\"utf-8\"\r\n\
-Content-Transfer-Encoding: 7bit\r\n\r\n\
-verify: https://chat.z.ai/auth/verify_email?token=verify-abc\r\n\
+Content-Transfer-Encoding: base64\r\n\r\n\
+{plain}\r\n\
 --b1_abc\r\n\
 Content-Type: text/html; charset=\"utf-8\"\r\n\
 Content-Transfer-Encoding: quoted-printable\r\n\r\n\
-<a href=3D\"https://chat.z.ai/auth/verify_email?token=3Dverify-\r\n\
-1314b38449d7fce835389bff2e59e3cc&amp;email=a%40mail.336536.xyz&amp;username=godpej&amp;=\r\nlanguage=3Dzh\">=E9=AA=8C=E8=AF=81</a>\r\n\
---b1_abc--\r\n";
+<tr><td align=3D\"center\">\r\n\
+  <a href=3D\"https://chat.z.ai/auth/verify_email?token=3Dverify-1314b38449=\r\n\
+d7fce835389bff2e59e3cc&amp;email=3Da%40mail.example.com&amp;username=3Dgo=\r\n\
+dpej&amp;language=3Dzh\" target=3D\"_blank\">=E9=AA=8C=E8=AF=81</a>\r\n\
+--b1_abc--\r\n"
+        )
+    }
 
     #[test]
     fn qp_multipart_extracts_full_link() {
-        let links = extract_links(SAMPLE_QP);
+        let links = extract_links(&real_shape_mail());
+        // base64 段与 QP 段给出同一条链接 → 去重后只留 1 条
         assert_eq!(links.len(), 1, "links={links:?}");
-        assert_eq!(
-            links[0],
-            "https://chat.z.ai/auth/verify_email?token=verify-1314b38449d7fce835389bff2e59e3cc&email=a@mail.336536.xyz&username=godpej&language=zh"
-        );
+        assert_eq!(links[0], FULL_LINK);
+    }
+
+    /// 真实样本里 token 正好被软换行切开（`…1314b38449=` ⏎ `d7fce8…`），必须拼回整条；
+    /// 拼不回来的话会得到一条「看似合法但必然验不过」的截断链接。
+    #[test]
+    fn token_split_by_soft_break_is_rejoined() {
+        let sample = "Content-Type: text/html; charset=\"utf-8\"\r\n\
+Content-Transfer-Encoding: quoted-printable\r\n\r\n\
+<a href=3D\"https://chat.z.ai/auth/verify_email?token=3Dverify-1314b38449=\r\n\
+d7fce835389bff2e59e3cc\">x</a>\r\n";
+        let links = extract_links(sample);
+        assert_eq!(links, vec!["https://chat.z.ai/auth/verify_email?token=verify-1314b38449d7fce835389bff2e59e3cc".to_string()]);
     }
 
     #[test]
