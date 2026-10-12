@@ -6,6 +6,10 @@ pub const STATUS_VERIFIED: &str = "verified";
 pub const STATUS_FAILED: &str = "failed";
 pub const STATUS_INVALID: &str = "invalid";
 
+/// 邮箱来源：Outlook（历史数据，默认）或 cloudflare_temp_email 临时邮箱
+pub const KIND_OUTLOOK: &str = "outlook";
+pub const KIND_CF: &str = "cf";
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct MailAccount {
     pub email: String,
@@ -23,6 +27,16 @@ pub struct MailAccount {
     pub note: Option<String>,
     #[serde(default)]
     pub created_at: String,
+    /// 邮箱源：`outlook` 或 `cf`（serde default 保证旧 mail.json 无痛兼容）
+    #[serde(default = "default_kind")]
+    pub kind: String,
+    /// cf 源在实例上的地址 id（用于清理；outlook 为 None）
+    #[serde(default)]
+    pub remote_id: Option<i64>,
+}
+
+fn default_kind() -> String {
+    KIND_OUTLOOK.to_string()
 }
 
 fn default_status() -> String {
@@ -37,9 +51,13 @@ pub struct Summary {
     pub note: Option<String>,
     pub has_token: bool,
     pub created_at: String,
+    pub kind: String,
 }
 
 impl MailAccount {
+    pub fn is_cf(&self) -> bool {
+        self.kind == KIND_CF
+    }
     pub fn to_summary(&self) -> Summary {
         Summary {
             email: self.email.clone(),
@@ -48,6 +66,7 @@ impl MailAccount {
             note: self.note.clone(),
             has_token: !self.refresh_token.trim().is_empty(),
             created_at: self.created_at.clone(),
+            kind: self.kind.clone(),
         }
     }
 }
@@ -159,6 +178,8 @@ pub fn import(accounts: &mut Vec<MailAccount>, raw: &str, now: String) -> Import
             verified_at: None,
             note: None,
             created_at: now.clone(),
+            kind: KIND_OUTLOOK.to_string(),
+            remote_id: None,
         });
         r.added += 1;
     }
@@ -201,6 +222,8 @@ mod tests {
             verified_at: None,
             note: None,
             created_at: String::new(),
+            kind: KIND_OUTLOOK.into(),
+            remote_id: None,
         }];
         let r = import(&mut acc, "a@b.com----new----c----r\nc@d.com----p----c----r\n", "now".into());
         assert_eq!(r.added, 1);
@@ -208,5 +231,15 @@ mod tests {
         assert_eq!(acc.len(), 2);
         assert_eq!(acc[0].password, "old", "已存在的不能被覆盖");
         assert_eq!(acc[1].status, STATUS_NEW);
+    }
+
+    #[test]
+    fn old_json_defaults_to_outlook_kind() {
+        // 旧版 mail.json 没有 kind 字段 —— 必须无痛兼容成 outlook
+        let raw = r#"{"email":"a@b.com","password":"p","client_id":"","refresh_token":"","status":"new","created_at":""}"#;
+        let a: MailAccount = serde_json::from_str(raw).unwrap();
+        assert_eq!(a.kind, KIND_OUTLOOK);
+        assert!(a.remote_id.is_none());
+        assert!(!a.is_cf());
     }
 }

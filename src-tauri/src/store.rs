@@ -132,6 +132,15 @@ pub struct Settings {
     /// 有了这个设置，可以只让反代走代理，不用整天开着 TUN。
     #[serde(default)]
     pub relay_proxy: Option<String>,
+
+    /// 临时邮箱服务（自部署的 cloudflare_temp_email）—— 注册流程的另一个邮箱源。
+    /// admin 密码**只存本机文件**，不进代码/日志/接口返回。
+    #[serde(default)]
+    pub cf_base_url: Option<String>,
+    #[serde(default)]
+    pub cf_admin_password: Option<String>,
+    #[serde(default)]
+    pub cf_domain: Option<String>,
 }
 
 pub fn set_relay_proxy(paths: &Paths, url: &str) -> Result<(), String> {
@@ -158,6 +167,19 @@ impl Settings {
         } else {
             None
         }
+    }
+    /// 临时邮箱服务的配置（base + admin 密码都齐了才算可用）
+    pub fn cf_cfg(&self) -> Option<crate::cfmail::CfCfg> {
+        let cfg = crate::cfmail::CfCfg {
+            base_url: self.cf_base_url.clone().unwrap_or_default(),
+            admin_password: self.cf_admin_password.clone().unwrap_or_default(),
+            domain: self
+                .cf_domain
+                .clone()
+                .map(|d| d.trim().to_string())
+                .filter(|d| !d.is_empty()),
+        };
+        cfg.is_ready().then_some(cfg)
     }
 }
 
@@ -190,6 +212,10 @@ pub struct AppState {
     pub auto_claim: bool,
     pub auth_proxy_on: bool,
     pub auth_proxy_url: Option<String>,
+    /// 临时邮箱服务：只回「配没配」+ 非敏感项，**密码永不出现在这里**
+    pub cf_configured: bool,
+    pub cf_base_url: Option<String>,
+    pub cf_domain: Option<String>,
     pub language: String,
 }
 
@@ -1515,6 +1541,9 @@ pub fn get_state(paths: &Paths) -> Result<AppState, String> {
         auto_claim: settings.auto_claim(),
         auth_proxy_on: settings.auth_proxy_on.unwrap_or(false),
         auth_proxy_url: settings.auth_proxy_url.clone(),
+        cf_configured: settings.cf_cfg().is_some(),
+        cf_base_url: settings.cf_base_url.clone(),
+        cf_domain: settings.cf_domain.clone(),
         language: crate::i18n::current().as_str().to_string(),
     })
 }

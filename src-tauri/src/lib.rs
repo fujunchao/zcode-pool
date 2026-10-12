@@ -640,6 +640,36 @@ async fn reg_fetch_link(
         .as_ref()
         .map(|p| p.flow.clone())
         .unwrap_or_default();
+
+    // 临时邮箱源（cloudflare_temp_email）：走管理接口取信，自己解码 raw MIME 抠链接
+    if acc.is_cf() {
+        let paths = Paths::detect();
+        let cfg = store::load_settings(&paths)
+            .cf_cfg()
+            .ok_or_else(|| i18n::tr("err.cf.noconfig").to_string())?;
+        let mails = cfmail::fetch_mails(&cfg, &acc.email, 10)?;
+        let (links, scanned) = cfmail::links_from_mails(&mails, since);
+        if !cur_flow.is_empty() {
+            flowlog::log(
+                &cur_flow,
+                "link-fetch",
+                &format!("cf address={} scanned={scanned} links={}", acc.email, links.len()),
+            );
+        }
+        let newest_at = mails
+            .iter()
+            .filter_map(|m| m.created_ms)
+            .max()
+            .and_then(|ms| chrono::DateTime::from_timestamp_millis(ms))
+            .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string());
+        return Ok(json!({
+            "links": links,
+            "scanned": scanned,
+            "newestSubject": "",
+            "newestAt": newest_at,
+        }));
+    }
+
     let (found, new_rt) = match graph::fetch_links(
         &acc.client_id,
         &acc.refresh_token,
@@ -835,6 +865,8 @@ async fn pool_upsert(app: AppHandle, line: String) -> Result<Value, String> {
             verified_at: None,
             note: None,
             created_at: store::now_ts(),
+            kind: pool::KIND_OUTLOOK.to_string(),
+            remote_id: None,
         });
         false
     };
@@ -842,6 +874,126 @@ async fn pool_upsert(app: AppHandle, line: String) -> Result<Value, String> {
     drop(_guard);
     let _ = app.emit("pool-changed", ());
     Ok(json!({ "email": email, "updated": updated }))
+}
+
+// ---------- 临时邮箱服务（cloudflare_temp_email）----------
+
+fn rand_from_chars(chars: &[u8], n: usize) -> String {
+    let mut buf = vec![0u8; n];
+    crate::oauth::getrandom_fallback(&mut buf);
+    buf.iter().map(|b| chars[(*b as usize) % chars.len()] as char).collect()
+}
+
+fn rand_local_name() -> String {
+    rand_from_chars(b"abcdefghijklmnopqrstuvwxyz0123456789", 10)
+}
+
+/// 给 z.ai 注册表单用的随机密码（去掉易混淆字符）
+fn rand_reg_password() -> String {
+    rand_from_chars(b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789", 16)
+}
+
+/// 保存临时邮箱服务配置。admin_password 传 None = 保持原样（界面不回显密码）。
+#[tauri::command]
+async fn set_cf_settings(
+    app: AppHandle,
+    base_url: Option<String>,
+    admin_password: Option<String>,
+    domain: Option<String>,
+) -> Result<(), String> {
+    let _guard = store_guard();
+    let paths = Paths::detect();
+    let mut s = load_settings(&paths);
+    let clean = |v: String| -> Option<String> {
+        let t = v.trim().to_string();
+        if t.is_empty() { None } else { Some(t) }
+    };
+    if let Some(v) = base_url {
+        s.cf_base_url = clean(v);
+    }
+    if let Some(v) = admin_password {
+        s.cf_admin_password = clean(v);
+    }
+    if let Some(v) = domain {
+        s.cf_domain = clean(v);
+    }
+    let r = save_settings(&paths, &s);
+    drop(_guard);
+    let _ = app.emit("state-changed", ());
+    r
+}
+
+/// 测试连通性：优先用传入的值（还没保存也能测），否则用已保存的。返回可见邮件条数。
+#[tauri::command]
+async fn cf_test(
+    base_url: Option<String>,
+    admin_password: Option<String>,
+    domain: Option<String>,
+) -> Result<Value, String> {
+    let paths = Paths::detect();
+    let saved = load_settings(&paths);
+    let pick = |given: Option<String>, old: Option<String>| -> String {
+        given
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .or(old)
+            .unwrap_or_default()
+    };
+    let cfg = cfmail::CfCfg {
+        base_url: pick(base_url, saved.cf_base_url.clone()),
+        admin_password: pick(admin_password, saved.cf_admin_password.clone()),
+        domain: {
+            let d = pick(domain, saved.cf_domain.clone());
+            if d.is_empty() { None } else { Some(d) }
+        },
+    };
+    let n = cfmail::probe(&cfg)?;
+    Ok(json!({ "ok": true, "visible": n }))
+}
+
+/// 现场创建 N 个临时邮箱地址并写进邮箱库（kind=cf；password 是给 z.ai 注册用的随机串）
+#[tauri::command]
+async fn cf_create(app: AppHandle, count: Option<usize>) -> Result<Value, String> {
+    let _guard = store_guard();
+    let paths = Paths::detect();
+    let cfg = load_settings(&paths)
+        .cf_cfg()
+        .ok_or_else(|| i18n::tr("err.cf.noconfig").to_string())?;
+    let root = paths.store_dir();
+    let mut accounts = pool::load(&root);
+    let n = count.unwrap_or(1).clamp(1, 20);
+    let mut created: Vec<Value> = vec![];
+    let mut errors: Vec<String> = vec![];
+    for _ in 0..n {
+        let name = rand_local_name();
+        match cfmail::create_address(&cfg, &name) {
+            Ok(c) => {
+                if pool::find(&accounts, &c.address).is_some() {
+                    errors.push(format!("{} 已在邮箱库，跳过", c.address));
+                    continue;
+                }
+                accounts.push(pool::MailAccount {
+                    email: c.address.clone(),
+                    password: rand_reg_password(),
+                    client_id: String::new(),
+                    refresh_token: String::new(),
+                    status: pool::STATUS_NEW.to_string(),
+                    verified_at: None,
+                    note: None,
+                    created_at: store::now_ts(),
+                    kind: pool::KIND_CF.to_string(),
+                    remote_id: Some(c.address_id),
+                });
+                created.push(json!({ "email": c.address, "address_id": c.address_id }));
+            }
+            Err(e) => errors.push(format!("{name}: {e}")),
+        }
+    }
+    let save = if created.is_empty() { Ok(()) } else { pool::save(&root, &accounts) };
+    drop(_guard);
+    save?;
+    let _ = app.emit("pool-changed", ());
+    Ok(json!({ "created": created, "errors": errors }))
 }
 
 #[tauri::command]
@@ -1614,6 +1766,9 @@ pub fn run() {
             export_all,
             import_files,
             pool_export,
+            set_cf_settings,
+            cf_test,
+            cf_create,
             pick_zcode_path,
             set_zcode_path,
             launch_zcode,

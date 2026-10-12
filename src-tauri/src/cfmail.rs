@@ -110,6 +110,27 @@ pub fn create_address(cfg: &CfCfg, name: &str) -> Result<Created, String> {
     })
 }
 
+/// 连通性/鉴权探测：拉最近一封（不限地址），返回可见邮件条数。
+pub fn probe(cfg: &CfCfg) -> Result<usize, String> {
+    if !cfg.is_ready() {
+        return Err("还没有配置临时邮箱服务（base URL / 管理员密码）".into());
+    }
+    let resp = agent()
+        .get(&cfg.url("/admin/mails?limit=1&offset=0"))
+        .set("x-admin-auth", cfg.admin_password.trim())
+        .call()
+        .map_err(|e| http_err("连接测试失败", e))?
+        .into_string()
+        .map_err(|e| format!("连接测试返回读取失败：{e}"))?;
+    let v: Value = serde_json::from_str(&resp).unwrap_or(Value::String(resp));
+    let arr = v
+        .get("results")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
+    Ok(arr.len())
+}
+
 /// 删除地址（连同其邮件）。失败不致命，调用方自行决定是否忽略。
 pub fn delete_address(cfg: &CfCfg, address_id: i64) -> Result<(), String> {
     if address_id == 0 {

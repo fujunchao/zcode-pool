@@ -2690,6 +2690,8 @@ fn handle(mut req: tiny_http::Request, gw: &Gateway) -> Result<(), String> {
                         verified_at: None,
                         note: None,
                         created_at: store::now_ts(),
+                        kind: crate::pool::KIND_OUTLOOK.to_string(),
+                        remote_id: None,
                     });
                     false
                 };
