@@ -110,7 +110,10 @@ pub fn create_address(cfg: &CfCfg, name: &str) -> Result<Created, String> {
     })
 }
 
-/// 连通性/鉴权探测：拉最近一封（不限地址），返回可见邮件条数。
+/// 连通性/鉴权探测：拉一封邮件，返回**服务上可见的邮件总数**。
+///
+/// 注意别用 `results.len()` 当"总数"：`limit=1` 时它恒为 0/1，界面会显示成"可见 1 封"而误导。
+/// 该实例的响应带顶层 `count`（总数），没有它才退回 `results` 长度。
 pub fn probe(cfg: &CfCfg) -> Result<usize, String> {
     if !cfg.is_ready() {
         return Err("还没有配置临时邮箱服务（base URL / 管理员密码）".into());
@@ -123,12 +126,18 @@ pub fn probe(cfg: &CfCfg) -> Result<usize, String> {
         .into_string()
         .map_err(|e| format!("连接测试返回读取失败：{e}"))?;
     let v: Value = serde_json::from_str(&resp).unwrap_or(Value::String(resp));
-    let arr = v
-        .get("results")
+    Ok(visible_count(&v))
+}
+
+/// 从 /admin/mails 的响应里取"可见邮件总数"：顶层 `count` 优先，没有才退回 `results` 长度。
+fn visible_count(v: &Value) -> usize {
+    if let Some(n) = v.get("count").and_then(|x| x.as_u64()) {
+        return n as usize;
+    }
+    v.get("results")
         .and_then(|x| x.as_array())
-        .cloned()
-        .unwrap_or_default();
-    Ok(arr.len())
+        .map(|a| a.len())
+        .unwrap_or(0)
 }
 
 /// 删除地址（连同其邮件）。失败不致命，调用方自行决定是否忽略。
@@ -507,6 +516,18 @@ d7fce835389bff2e59e3cc\">x</a>\r\n";
 https://chat.z.ai/auth/verify_email?token=verify-soft=\r\nbreak&x=1\r\n";
         let links = extract_links(sample);
         assert_eq!(links[0], "https://chat.z.ai/auth/verify_email?token=verify-softbreak&x=1");
+    }
+
+    /// `limit=1` 时 `results` 恒为 1 —— 总数必须取顶层 `count`，否则界面会显示"可见 1 封"。
+    #[test]
+    fn visible_count_prefers_top_level_count() {
+        let with_count: Value =
+            serde_json::from_str(r#"{"count":232,"results":[{"id":1,"raw":"x"}]}"#).unwrap();
+        assert_eq!(visible_count(&with_count), 232);
+        // 没有 count 字段的老实例：退回 results 长度
+        let no_count: Value = serde_json::from_str(r#"{"results":[{},{}]}"#).unwrap();
+        assert_eq!(visible_count(&no_count), 2);
+        assert_eq!(visible_count(&Value::Null), 0);
     }
 
     #[test]
