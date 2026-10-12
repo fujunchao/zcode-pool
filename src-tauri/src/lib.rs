@@ -647,7 +647,17 @@ async fn reg_fetch_link(
         let cfg = store::load_settings(&paths)
             .cf_cfg()
             .ok_or_else(|| i18n::tr("err.cf.noconfig").to_string())?;
-        let mails = cfmail::fetch_mails(&cfg, &acc.email, 10)?;
+        let mails = match cfmail::fetch_mails(&cfg, &acc.email, 10) {
+            Ok(v) => v,
+            Err(e) => {
+                // 与 Graph 分支对称：失败也留痕，便于回头查是配置错还是服务端问题
+                if !cur_flow.is_empty() {
+                    let short: String = e.chars().take(200).collect();
+                    flowlog::log(&cur_flow, "link-fetch-fail", &short);
+                }
+                return Err(e);
+            }
+        };
         let (links, scanned) = cfmail::links_from_mails(&mails, since);
         if !cur_flow.is_empty() {
             flowlog::log(
