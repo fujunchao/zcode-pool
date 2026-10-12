@@ -667,27 +667,6 @@ async fn reg_fetch_link(
             }
         }
     }
-        let (links, scanned) = cfmail::links_from_mails(&mails, since);
-        if !cur_flow.is_empty() {
-            flowlog::log(
-                &cur_flow,
-                "link-fetch",
-                &format!("cf address={} scanned={scanned} links={}", acc.email, links.len()),
-            );
-        }
-        let newest_at = mails
-            .iter()
-            .filter_map(|m| m.created_ms)
-            .max()
-            .and_then(|ms| chrono::DateTime::from_timestamp_millis(ms))
-            .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string());
-        return Ok(json!({
-            "links": links,
-            "scanned": scanned,
-            "newestSubject": "",
-            "newestAt": newest_at,
-        }));
-    }
 
     let (found, new_rt) = match graph::fetch_links(
         &acc.client_id,
