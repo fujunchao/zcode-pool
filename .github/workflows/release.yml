@@ -50,18 +50,21 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.2.3' }}
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.2.4' }}
           releaseName: 'Z·POOL ${{ github.ref_name }}'
           releaseBody: |
-            本版修复 / 改进
+            本版新增 / 改进
 
-            - **系统提示词精简 84%**：上游只校验提示词的**开头**（从第 0 个字节逐字节比对到身份段末尾为止），
-              后面的段落可有可无。现在只发必需的两块，**7814 → 1253 字符**。
-              - **不再把本机路径写进每一次请求** —— 原先固定带上 `# Environment` 段，
-                含 `C:\Users\<用户名>\.zcode\workspace\default`。
-              - 去掉了客户端专属的 `::code-comment` 指令、`/<skill-name>` 走 Skill 工具等段落 ——
-                第三方客户端不认这些，模型照着吐出来就是幻觉。
-              - 上游实测仍为 **200**，行为不受影响。
+            - **临时邮箱源（Cloudflare）**：邮箱库可接入自部署的 cloudflare_temp_email 实例 —— 设置页填好服务地址与凭据后，
+              可在邮箱库「现场建址」一键开箱，注册 / 登录链路从临时邮箱自动取验证链接；与 Outlook 通道并存，来源按收信域名自动识别。
+            - **「导出到 zcode2api-plus」**：账号库新增专属导出，一键生成 zcode2api-plus 的 `providers` v1 导入文件 ——
+              只含账号名与登录 JWT；加密凭据会在本机先解密，解不开的账号自动跳过并列在结果里；不含邮箱、供应商配置与设备身份。
+
+            修复 / 改进
+
+            - 控制台「查看邮件」支持临时邮箱源（字段与 Graph 通道对齐），主题按 RFC2047 正确解码（Q/B 编码、相邻编码字、=3F 与软换行截断场景）。
+            - 临时邮箱连通性测试改报真实邮件总数（原先拿单页条数当总数，显示成「可见 1 封」）。
+            - CI：新增 check 工作流（i18n 词条 + 前端构建 + Rust 单测），main 与特性分支推送即触发。
 
             下载：Windows `*_x64-setup.exe` · macOS `*_universal.dmg` · Linux `*.deb` / `*.AppImage`
 
