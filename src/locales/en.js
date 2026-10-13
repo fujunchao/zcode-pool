@@ -352,6 +352,7 @@ export const en = {
   "reg.btn.close": "Close assistant",
   "reg.btn.toRegister": "Switch to email signup",
   "reg.btn.skip": "Skip this account",
+  "reg.btn.tile": "Tile windows",
 
   "reg.step.open-signup": "Open signup page",
   "reg.step.signup-form": "Fill in signup details",

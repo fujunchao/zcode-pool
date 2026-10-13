@@ -352,6 +352,7 @@ export const zh = {
   "reg.btn.close": "关闭助手",
   "reg.btn.toRegister": "改用邮箱注册",
   "reg.btn.skip": "跳过该账号",
+  "reg.btn.tile": "整理窗口",
 
   "reg.step.open-signup": "打开注册页",
   "reg.step.signup-form": "填写注册信息",

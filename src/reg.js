@@ -354,6 +354,7 @@ function render() {
       <span class="drw-title">${esc(t("reg.title"))} · ${esc(modeLabel(list[0].mode))}</span>
       ${list.length > 1 ? `<span class="chip new">${esc(t("reg.runningCount", { n: activeN }))}</span>` : ""}
       <span class="spacer"></span>
+      ${list.length > 1 ? `<button class="btn sm" data-act="tile" title="${esc(t("reg.btn.tile"))}">${ic("tile", 12)} ${esc(t("reg.btn.tile"))}</button>` : ""}
       <button class="iconbtn" data-act="close" title="${esc(t("reg.btn.close"))}" style="color:var(--ink-2)">${ic("x", 14)}</button>
     </div>
     ${barHtml}
@@ -384,6 +385,10 @@ function doSkip(flow) {
 async function onAction(act, flow) {
   if (act === "close") return regClose();
   if (act === "skip") return doSkip(flow);
+  if (act === "tile") {
+    invoke("reg_tile_windows").catch(() => {});
+    return;
+  }
   try {
     if (act === "reveal") await invoke("reg_action", { flow, action: "reveal" });
     else if (act === "retry") {

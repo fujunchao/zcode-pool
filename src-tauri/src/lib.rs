@@ -496,6 +496,62 @@ fn close_login_windows(app: &AppHandle, flow: Option<&str>) {
     }
 }
 
+/// 登录窗口自动平铺：在（优先）主窗口所在显示器上，把所有 `login-*` 窗口排成互不重叠的网格，
+/// 整组居中——并行注册时无需手动拖动即可同时看到每个窗口的滑块。
+/// 新窗口打开时自动调用；也由 `reg_tile_windows` 命令手动触发（被拖乱后一键归位）。
+fn tile_login_windows(app: &AppHandle) {
+    let wins = login_windows(app);
+    let n = wins.len() as i32;
+    if n == 0 {
+        return;
+    }
+    // 目标显示器：主窗口所在屏 → 系统主屏 → 任一登录窗口所在屏
+    let mon = app
+        .get_webview_window("main")
+        .and_then(|m| m.current_monitor().ok().flatten())
+        .or_else(|| app.primary_monitor().ok().flatten())
+        .or_else(|| wins.iter().find_map(|(_, w)| w.current_monitor().ok().flatten()));
+    let Some(mon) = mon else { return };
+    let (mp, ms, scale) = (mon.position(), mon.size(), mon.scale_factor());
+    if scale <= 0.0 || ms.width < 320 || ms.height < 240 {
+        return;
+    }
+    // 实测窗口外框（物理像素，所有登录窗口同尺寸）；取不到就按 inner 480x680 + 系统边框估算
+    let (ow, oh) = wins
+        .iter()
+        .find_map(|(_, w)| w.outer_size().ok().map(|s| (s.width as i32, s.height as i32)))
+        .filter(|(w, h)| *w > 0 && *h > 0)
+        .unwrap_or(((500.0 * scale).round() as i32, (734.0 * scale).round() as i32));
+
+    let gap = (10.0 * scale).round() as i32;
+    let margin = (10.0 * scale).round() as i32;
+    let bottom = (52.0 * scale).round() as i32; // 底部预留（任务栏）
+    let avail_w = (ms.width as i32 - margin * 2).max(ow);
+    let avail_h = (ms.height as i32 - margin - bottom).max(oh);
+
+    // 不重叠前提下每行最多几列
+    let cap = ((avail_w + gap) / (ow + gap)).clamp(1, n);
+    // 从大到小挑列数：优先整体高度放得下的最多列（行数最少）；都放不下则用 cap（纵向溢出、顶部对齐）
+    let mut cols = cap;
+    for c in (1..=cap).rev() {
+        let rows = (n + c - 1) / c;
+        if rows * oh + (rows - 1) * gap <= avail_h {
+            cols = c;
+            break;
+        }
+    }
+    let rows = (n + cols - 1) / cols;
+    let total_w = cols * ow + (cols - 1) * gap;
+    let total_h = rows * oh + (rows - 1) * gap;
+    let x0 = mp.x + margin + ((avail_w - total_w) / 2).max(0);
+    let y0 = mp.y + margin + ((avail_h - total_h) / 2).max(0);
+    for (i, (_, w)) in wins.iter().enumerate() {
+        let i = i as i32;
+        let (r, c) = (i / cols, i % cols);
+        let _ = w.set_position(tauri::PhysicalPosition::new(x0 + c * (ow + gap), y0 + r * (oh + gap)));
+    }
+}
+
 /// 登录窗口标题：统一拼 "标题 · email"（无邮箱则只标题）。
 fn login_title(email: Option<&str>) -> String {
     let base = i18n::tr("title.login");
@@ -657,6 +713,8 @@ async fn oauth_begin(
         flowlog::log(&flow, "window-fail", &m);
         m
     })?;
+    // 新窗口就位：连同已有登录窗口一起平铺（并行时不叠在一起）
+    tile_login_windows(&app);
     if let Some(w) = find_login_window(&app, &flow) {
         let app_close = app.clone();
         let flow_evt2 = flow.clone();
@@ -910,6 +968,13 @@ async fn pool_mark_verified(
 #[tauri::command]
 async fn reg_close_window(app: AppHandle, flow: Option<String>) -> Result<(), String> {
     close_login_windows(&app, flow.as_deref());
+    Ok(())
+}
+
+/// 手动把全部登录窗口重新平铺归位（用户拖动乱之后）。
+#[tauri::command]
+async fn reg_tile_windows(app: AppHandle) -> Result<(), String> {
+    tile_login_windows(&app);
     Ok(())
 }
 
@@ -1967,6 +2032,7 @@ pub fn run() {
             reg_action,
             reg_set_mode,
             reg_close_window,
+            reg_tile_windows,
             reg_fetch_link,
             pool_list,
             pool_import_pick,

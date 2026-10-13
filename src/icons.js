@@ -23,6 +23,8 @@ const ICONS = {
          <path d="M16 13H6"/><path d="M8.8 10.2 6 13l2.8 2.8"/>`,
   refresh: `<path d="M16 10a6 6 0 1 1-1.8-4.3"/><path d="M16 3.6V7h-3.4"/>`,
 
+  tile: `<rect x="2.8" y="4.6" width="6.2" height="10.8" rx="1.6"/><rect x="11" y="4.6" width="6.2" height="10.8" rx="1.6"/>`,
+
   gauge: `<path d="M3.2 14a6.8 6.8 0 0 1 13.6 0"/><path d="M10 14l3-4"/>`,
   pen: `<path d="M4 16l.8-3.2 8-8 2.4 2.4-8 8z"/><path d="M11.6 5.6l2.4 2.4"/>`,
   gift: `<rect x="3.6" y="8.4" width="12.8" height="7.6" rx="1.8"/><path d="M3.6 11.6h12.8"/><path d="M10 8.4v7.6"/>
