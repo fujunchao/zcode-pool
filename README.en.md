@@ -91,6 +91,7 @@ Download the package for your platform from the [Releases](../../releases) page:
 | Platform | File |
 | --- | --- |
 | Windows | `*_x64-setup.exe` |
+| Windows (no install) | `*_portable.exe` — standalone, just double-click, no registry writes |
 | macOS | `*_universal.dmg` |
 | Linux | `*.deb` / `*.AppImage` |
 

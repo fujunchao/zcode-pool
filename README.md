@@ -83,6 +83,7 @@ Z·POOL 是一个基于 Tauri 2 的桌面工具，把 ZCode / Z.ai 的多账号�
 | 平台 | 文件 |
 | --- | --- |
 | Windows | `*_x64-setup.exe`（安装包） |
+| Windows（免安装） | `*_portable.exe`（便携版，双击即用、不写注册表） |
 | macOS | `*_universal.dmg` |
 | Linux | `*.deb` / `*.AppImage` |
 
