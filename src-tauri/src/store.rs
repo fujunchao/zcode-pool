@@ -141,6 +141,10 @@ pub struct Settings {
     pub cf_admin_password: Option<String>,
     #[serde(default)]
     pub cf_domain: Option<String>,
+
+    /// 批量注册并发数（1–5，默认 2）。缺省时按 2 处理。
+    #[serde(default)]
+    pub reg_concurrency: Option<u32>,
 }
 
 pub fn set_relay_proxy(paths: &Paths, url: &str) -> Result<(), String> {
@@ -181,6 +185,10 @@ impl Settings {
         };
         cfg.is_ready().then_some(cfg)
     }
+    /// 批量注册并发数（1–5，默认 2）
+    pub fn reg_concurrency(&self) -> u32 {
+        self.reg_concurrency.unwrap_or(2).clamp(1, 5)
+    }
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -216,6 +224,8 @@ pub struct AppState {
     pub cf_configured: bool,
     pub cf_base_url: Option<String>,
     pub cf_domain: Option<String>,
+    /// 批量注册并发数（1–5，默认 2）
+    pub reg_concurrency: u32,
     pub language: String,
 }
 
@@ -1603,6 +1613,7 @@ pub fn get_state(paths: &Paths) -> Result<AppState, String> {
         cf_configured: settings.cf_cfg().is_some(),
         cf_base_url: settings.cf_base_url.clone(),
         cf_domain: settings.cf_domain.clone(),
+        reg_concurrency: settings.reg_concurrency(),
         language: crate::i18n::current().as_str().to_string(),
     })
 }
