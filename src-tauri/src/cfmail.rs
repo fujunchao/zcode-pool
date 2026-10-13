@@ -262,36 +262,67 @@ fn summary_of(m: &RawMail) -> Value {
 
 /// 解 RFC2047 编码字（`=?utf-8?b?…?=` / `=?utf-8?q?…?=`）——真实邮件里 Subject 就长这样
 /// （`=?utf-8?b?6aqM6K+B5oKo55qE55S15a2Q6YKu566x?=` = 「验证您的电子邮箱」）。
+///
+/// 必须**按结构解析**而不能去搜第一个 `?=`：Q 编码的正文里 `=?utf-8?Q?=E9=AA=8C…` 的 `Q?=E9`
+/// 也长得像终止符（这是踩过的坑）。依据 RFC2047，编码正文里不允许出现裸 `?`
+/// （Q 编码要写成 `=3F`，B 编码字母表里根本没有 `?`），所以结构就是 charset ␣ enc ␣ text ␣ `?=`。
 /// 解不开的整段原样保留，别把信息弄丢。
 fn decode_rfc2047(s: &str) -> String {
+    let b = s.as_bytes();
     let mut out = String::new();
-    let mut rest = s;
-    while let Some(start) = rest.find("=?") {
-        let Some(rel_end) = rest[start + 2..].find("?=") else {
+    let mut i = 0usize;
+    while i < b.len() {
+        if !(b[i] == b'=' && b.get(i + 1) == Some(&b'?')) {
+            let ch = s[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        // charset ? enc ? text ?=
+        let Some(p1) = s[i + 2..].find('?').map(|k| i + 2 + k) else {
+            out.push_str(&s[i..]);
             break;
         };
-        let end = start + 2 + rel_end;
-        let parts: Vec<&str> = rest[start + 2..end].splitn(3, '?').collect();
-        let decoded = if parts.len() == 3 {
-            match parts[1].to_ascii_lowercase().as_str() {
-                "b" => B64
-                    .decode(parts[2].as_bytes())
-                    .ok()
-                    .map(|b| String::from_utf8_lossy(&b).into_owned()),
-                "q" => Some(decode_qp(&parts[2].replace('_', " "))),
-                _ => None,
-            }
-        } else {
-            None
+        let enc = b
+            .get(p1 + 1)
+            .map(|c| (*c as char).to_ascii_lowercase());
+        if b.get(p1 + 2) != Some(&b'?') || !matches!(enc, Some('b') | Some('q')) {
+            out.push_str("=?");
+            i += 2;
+            continue;
+        }
+        let text_start = p1 + 3;
+        let Some(p2) = s[text_start..].find('?').map(|k| text_start + k) else {
+            out.push_str(&s[i..]);
+            break;
         };
-        out.push_str(&rest[..start]);
+        if b.get(p2 + 1) != Some(&b'=') {
+            out.push_str("=?");
+            i += 2;
+            continue;
+        }
+        let text = &s[text_start..p2];
+        let decoded = match enc {
+            Some('b') => B64
+                .decode(text.as_bytes())
+                .ok()
+                .map(|v| String::from_utf8_lossy(&v).into_owned()),
+            _ => Some(decode_qp(&text.replace('_', " "))),
+        };
         match decoded {
             Some(d) => out.push_str(&d),
-            None => out.push_str(&rest[start..end + 2]),
+            None => out.push_str(&s[i..p2 + 2]),
         }
-        rest = &rest[end + 2..];
+        i = p2 + 2;
+        // 相邻编码字之间的空白按 RFC2047 应当丢掉（`=?…?= =?…?=` 要直接拼接）
+        let mut j = i;
+        while j < b.len() && matches!(b[j], b' ' | b'\t' | b'\r' | b'\n') {
+            j += 1;
+        }
+        if j > i && s[j..].starts_with("=?") {
+            i = j;
+        }
     }
-    out.push_str(rest);
     out
 }
 
@@ -606,6 +637,10 @@ https://chat.z.ai/auth/verify_email?token=verify-soft=\r\nbreak&x=1\r\n";
         assert_eq!(decode_rfc2047("=?utf-8?b?5qyi6L+O5Yqg5YWl?= Z.ai"), "欢迎加入 Z.ai");
         // Q 编码：下划线代表空格
         assert_eq!(decode_rfc2047("=?utf-8?Q?=E9=AA=8C=E8=AF=81_ok?="), "验证 ok");
+        // Q 编码正文里的 `=3F` 代表字面 `?`，不能被当成终止符
+        assert_eq!(decode_rfc2047("=?utf-8?Q?ok=3F?="), "ok?");
+        // 相邻编码字之间的空白按 RFC2047 丢掉（直接拼接）
+        assert_eq!(decode_rfc2047("=?utf-8?b?6aqM6K+B?= =?utf-8?b?5oKo55qE?="), "验证您的");
         // 解不开的整段原样保留，别丢信息
         assert_eq!(decode_rfc2047("plain subject"), "plain subject");
         assert_eq!(decode_rfc2047("=?utf-8?b?@@@?="), "=?utf-8?b?@@@?=");
