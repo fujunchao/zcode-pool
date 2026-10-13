@@ -1036,6 +1036,30 @@ pub fn delete_account(paths: &Paths, id: &str) -> Result<(), String> {
     fs::remove_file(&path).map_err(|e| trf("err.store.delete_fail", &[("e", &e.to_string())]))
 }
 
+/// 批量删除：逐个删，**容错不中断** —— 返回 (成功删除的 id, 跳过的 id)。
+/// 跳过 = id 非法 / 文件已不存在 / 删除失败：批量场景里一个失效存档不该阻断整批，
+/// 前端按 removed 计数提示、skipped 附带说明。
+pub fn delete_accounts(paths: &Paths, ids: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut removed = Vec::new();
+    let mut skipped = Vec::new();
+    for id in ids {
+        if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            skipped.push(id.clone());
+            continue;
+        }
+        let path = paths.accounts_dir().join(format!("{id}.json"));
+        if !path.exists() {
+            skipped.push(id.clone());
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => removed.push(id.clone()),
+            Err(_) => skipped.push(id.clone()),
+        }
+    }
+    (removed, skipped)
+}
+
 pub fn update_account_from_live(paths: &Paths, id: &str) -> Result<Account, String> {
     let live = read_live(paths)?.ok_or(tr("err.live.no_file"))?;
     if !is_logged_in(&live) {

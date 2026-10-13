@@ -21,6 +21,9 @@ let acctQuota = {};
 let claimable = {};
 let claimAllRunning = false;
 let filter = "";
+// 账号库批量管理：selMode 打开后行内出现复选框、行点击切换选中；acctSel 存账号 id。
+let acctSelMode = false;
+const acctSel = new Set();
 let relayRefreshing = false;
 let relay = { running: false, port: 0, served: 0, switched: 0, clientAccount: null, routedAccount: null, routedModel: null, routedTries: null, nextAccount: null, quotaAccounts: 0, quotaTotal: 0, quotaFailed: [], source: "pool", clientQuota: null, deviceMode: "route", blocked: 0, pausedFor: 0, lastRefresh: null, upstream: "", external: false, externalModels: [], mint: { pool: 0, waiters: 0, active: false, mints: 0, mints10min: 0 }, patch: { found: false, applied: false } };
 
@@ -328,6 +331,62 @@ const actions = {
           const p = await invoke("export_one", { id });
           if (!p.picked) { toast(t("m.exportCanceled")); return; }
           toast(t("m.exportSaved"), "ok", p.path);
+        } catch (e) { toast(stripErr(e), "err"); }
+      },
+    });
+  },
+
+  acctBatchToggle() {
+    acctSelMode = !acctSelMode;
+    if (!acctSelMode) acctSel.clear();
+    render();
+  },
+
+  acctSelectNone() {
+    acctSel.clear();
+    render();
+  },
+
+  async acctBatchExport() {
+    const ids = [...acctSel];
+    if (!ids.length) return;
+    openConfirmModal({
+      kind: "warn",
+      icon: "export",
+      title: t("m.batchExportTitle", { n: ids.length }),
+      desc: t("m.exportWhat"),
+      yesLabel: t("m.exportPick"),
+      onYes: async () => {
+        try {
+          const r = await invoke("export_selected", { ids });
+          if (!r.picked) { toast(t("m.exportCanceled")); return; }
+          toast(t("m.exportSavedAll", { count: r.count }), "ok", r.path);
+          if (r.skipped) toast(t("m.batchSkipped", { k: r.skipped }), "warn");
+        } catch (e) { toast(stripErr(e), "err"); }
+      },
+    });
+  },
+
+  async acctBatchDelete() {
+    const ids = [...acctSel];
+    if (!ids.length) return;
+    const names = ids.slice(0, 6).map((id) => esc(accountName(id))).join("<br>");
+    const more = ids.length > 6 ? `<br>${esc(t("mb.deleteListMore", { n: ids.length - 6 }))}` : "";
+    openConfirmModal({
+      kind: "danger",
+      icon: "x",
+      title: t("m.batchDeleteTitle", { n: ids.length }),
+      desc: `${esc(t("m.batchDeleteDesc"))}<br><br>${names}${more}`,
+      yesLabel: t("common.delete"),
+      onYes: async () => {
+        try {
+          const r = await invoke("delete_many", { ids });
+          const n = (r.removed || []).length;
+          const k = (r.skipped || []).length;
+          toast(t("m.batchDeleted", { n }), n ? "ok" : "warn", k ? t("m.batchSkipped", { k }) : "");
+          acctSel.clear();
+          await refresh();
+          render();
         } catch (e) { toast(stripErr(e), "err"); }
       },
     });
@@ -1067,9 +1126,11 @@ function rowHtml(a) {
     meta += `<span class="${exp.warn ? "warn-line" : ""}">${esc(t("q.validUntil", { date: exp.text }))}</span>`;
   }
   if (ident) meta += `${meta ? " · " : ""}${esc(ident)}`;
+  const sel = acctSelMode && acctSel.has(a.id);
   return `
   <div class="row${isActive ? " active" : ""}" data-id="${a.id}">
     <div class="row-top">
+      ${acctSelMode ? `<input type="checkbox" class="cbx acct-check" data-id="${a.id}" ${sel ? "checked" : ""} aria-label="${esc(a.name)}">` : ""}
       <span class="notch" style="background:${notchColor(a.id)}"></span>
       <div class="row-main">
         <div class="row-name">${esc(a.name)}${providerBadge(a)}${tierBadgeFor(a.id)}${isActive ? `<span class="tag-use">${t("btn.inUse")}</span>` : ""}${a.has_user_info === false ? `<span class="tag-relogin" title="${esc(t("btn.reloginTitle"))}">${t("btn.relogin")}</span>` : ""}</div>
@@ -1112,10 +1173,39 @@ function filteredAccounts(s) {
   return q ? s.accounts.filter((a) => accountMatches(a, q)) : s.accounts;
 }
 
+function acctPruneSel() {
+  const live = new Set((state?.accounts || []).map((a) => a.id));
+  for (const id of [...acctSel]) if (!live.has(id)) acctSel.delete(id);
+}
+
+function acctToggle(id, on) {
+  if (on) acctSel.add(id);
+  else acctSel.delete(id);
+}
+
+function acctSelectAll(on) {
+  for (const a of filteredAccounts(state)) {
+    if (on) acctSel.add(a.id);
+    else acctSel.delete(a.id);
+  }
+  render();
+}
+
+/** 同步「全选」复选框：全选 / 部分选中（indeterminate）/ 未选 */
+function acctHeadSync() {
+  const all = document.getElementById("acct-all");
+  if (!all) return;
+  const shown = filteredAccounts(state);
+  const on = shown.reduce((n, a) => n + (acctSel.has(a.id) ? 1 : 0), 0);
+  all.checked = shown.length > 0 && on === shown.length;
+  all.indeterminate = on > 0 && on < shown.length;
+}
+
 function applyFilter() {
   if (!state) return;
   const main = $app.querySelector(".account-list .group");
   if (main) main.innerHTML = listHtmlFor(state, filteredAccounts(state));
+  acctHeadSync();
 }
 
 function quotaWindowRank(it) {
@@ -1393,6 +1483,7 @@ function render() {
     return;
   }
   const s = state;
+  acctPruneSel();
   const active = s.accounts.find((a) => a.is_active) || null;
   const unsaved = s.live_logged_in && !active;
 
@@ -1439,8 +1530,23 @@ function render() {
   } else if (tab === "proxy") {
     body = proxyView();
   } else {
-    const listHtml = listHtmlFor(s, filteredAccounts(s));
+    const shown = filteredAccounts(s);
+    const listHtml = listHtmlFor(s, shown);
     const claimableCount = s.accounts.filter((a) => (claimable[a.id]?.plans || []).length > 0).length;
+    const selAllShown = shown.length > 0 && shown.every((a) => acctSel.has(a.id));
+    const batchBar = acctSelMode
+      ? `<div class="list-head">
+          <label class="selall">
+            <input type="checkbox" class="cbx" id="acct-all" ${selAllShown ? "checked" : ""}>
+            <span>${t("m.selectAll")}</span>
+          </label>
+          <span class="selinfo">${acctSel.size ? t("m.selected", { n: acctSel.size }) : ""}</span>
+          <span class="spacer"></span>
+          ${acctSel.size ? `<button class="btn g sm" click="actions.acctSelectNone()">${t("m.selectNone")}</button>` : ""}
+          <button class="btn sm" click="actions.acctBatchExport()" ${acctSel.size ? "" : "disabled"}>${ic("export", 14)} ${t("btn.batchExport")}${acctSel.size ? ` (${acctSel.size})` : ""}</button>
+          <button class="btn d sm" click="actions.acctBatchDelete()" ${acctSel.size ? "" : "disabled"}>${ic("trash", 14)} ${t("btn.batchDelete")}${acctSel.size ? ` (${acctSel.size})` : ""}</button>
+        </div>`
+      : "";
     body = `
       <div class="content-h">
         <h1>${t("m.accounts")}</h1>
@@ -1472,17 +1578,21 @@ function render() {
           : s.zcode_path_ok
           ? `<button class="btn-ghost has-ic" click="actions.launch()">${ic("play", 14)} ${t("btn.launchZcode")}</button>`
           : `<button class="btn-ghost has-ic" click="actions.openSettings()" title="${esc(t("btn.zcodePathBad", { path: s.zcode_path || "-" }))}">${ic("alert", 14)} ${t("btn.fixZcodePath")}</button>`}
+        ${(s.accounts.length >= 2 || acctSelMode)
+          ? `<button class="btn-ghost has-ic${acctSelMode ? " on" : ""}" click="actions.acctBatchToggle()">${acctSelMode ? `${ic("x", 15)} ${t("btn.batchExit")}` : `${ic("check", 16)} ${t("btn.batch")}`}</button>`
+          : ""}
         <span class="tb-spacer"></span>
         ${s.accounts.length >= 4
           ? `<input class="list-filter" id="list-filter" type="search" autocomplete="off" spellcheck="false"
                value="${esc(filter)}" placeholder="${t("m.filterPh")}" aria-label="${t("m.filterPh")}">`
           : ""}
       </section>
-      <div class="list account-list"><div class="group">${listHtml}</div></div>`;
+      <div class="list account-list">${batchBar}<div class="group">${listHtml}</div></div>`;
   }
 
   $app.innerHTML = `<div class="shell">${sidebar}<div class="content page-${tab}">${body}</div></div>`;
   restoreScroll(scrollCap);
+  acctHeadSync();
 }
 
 window.actions = actions;
@@ -1500,6 +1610,9 @@ setRegSkip(() => mboxSkipCurrent());
 document.addEventListener("change", (e) => {
   const el = e.target;
   if (!el) return;
+  if (el.id === "acct-all") { acctSelectAll(el.checked); return; }
+  const acbx = el.closest ? el.closest(".acct-check") : null;
+  if (acbx) { acctToggle(acbx.dataset.id, acbx.checked); render(); return; }
   if (el.id === "mb-all") { mboxSelectAll(el.checked); return; }
   const cb = el.closest ? el.closest(".mb-check") : null;
   if (!cb) return;
@@ -1515,6 +1628,10 @@ document.addEventListener("click", (e) => {
   const reauth = e.target.closest(".mb-reauth");
   if (reauth) { e.preventDefault(); mboxReauth(reauth.dataset.reauth); return; }
   if (e.target.closest("button, input, select, a, label")) return; // 控件自己处理
+  if (acctSelMode) {
+    const arow = e.target.closest(".row[data-id]");
+    if (arow) { acctToggle(arow.dataset.id, !acctSel.has(arow.dataset.id)); render(); return; }
+  }
   const row = e.target.closest(".row[data-email]");
   if (row) mboxToggleRow(row.dataset.email);
 });

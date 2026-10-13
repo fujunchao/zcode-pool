@@ -190,6 +190,15 @@ async fn delete_account(app: AppHandle, id: String) -> Result<(), String> {
     r
 }
 
+/// 批量删除账号库存档（容错：失效 id 跳过、不阻断整批；返回值区分 removed / skipped）。
+#[tauri::command]
+async fn delete_many(app: AppHandle, ids: Vec<String>) -> Result<serde_json::Value, String> {
+    let _guard = store_guard();
+    let (removed, skipped) = store::delete_accounts(&Paths::detect(), &ids);
+    rebuild_tray(&app);
+    Ok(json!({ "removed": removed, "skipped": skipped }))
+}
+
 #[tauri::command]
 async fn update_account_from_live(app: AppHandle, id: String) -> Result<Account, String> {
     let _guard = store_guard();
@@ -1593,6 +1602,48 @@ async fn export_all(app: AppHandle) -> Result<serde_json::Value, String> {
     Ok(json!({ "picked": true, "path": path.to_string_lossy(), "count": accounts.len() }))
 }
 
+/// 批量导出**选中的**账号：与 export_all 同为 bundle v2，只含传入子集。
+/// 单个 id 读不出来（已被删 / 文件损坏）跳过不阻断整批，返回值带 skipped 计数。
+#[tauri::command]
+async fn export_selected(app: AppHandle, ids: Vec<String>) -> Result<serde_json::Value, String> {
+    let paths = Paths::detect();
+    let mut accounts = Vec::new();
+    let mut skipped = 0usize;
+    for id in &ids {
+        match store::load_account(&paths, id) {
+            Ok(a) => accounts.push(a),
+            Err(_) => skipped += 1,
+        }
+    }
+    if accounts.is_empty() {
+        return Err(i18n::tr("err.export.empty"));
+    }
+    let default_name = if accounts.len() == 1 {
+        format!("{}.json", sanitize_filename(&accounts[0].name))
+    } else {
+        "zcode-accounts-selected.json".to_string()
+    };
+    let picked = app
+        .dialog()
+        .file()
+        .add_filter(&i18n::tr("dialog.json"), &["json"])
+        .set_file_name(&default_name)
+        .blocking_save_file();
+    let Some(fp) = picked else {
+        return Ok(json!({ "picked": false }));
+    };
+    let path = fp.into_path().map_err(|e| i18n::trf("err.path.invalid", &[("e", &e.to_string())]))?;
+    let payload = store::export_bundle_value(&accounts);
+    let body = serde_json::to_string_pretty(&payload).unwrap() + "\n";
+    store::atomic_write(&path, &body).map_err(|e| i18n::trf("err.write", &[("e", &e.to_string())]))?;
+    Ok(json!({
+        "picked": true,
+        "path": path.to_string_lossy(),
+        "count": accounts.len(),
+        "skipped": skipped,
+    }))
+}
+
 /// 导出为 zcode2api-plus 的 providers v1 导入文件（可直接在其管理台上传导入）。
 /// 与 export_all 的形状不同：只含账号名 + 登录 JWT，供对方 ImportAccounts 消费。
 #[tauri::command]
@@ -1793,6 +1844,7 @@ pub fn run() {
             capture_current,
             rename_account,
             delete_account,
+            delete_many,
             update_account_from_live,
             switch_to,
             get_live_quota,
@@ -1829,6 +1881,7 @@ pub fn run() {
             autostart_set,
             export_one,
             export_all,
+            export_selected,
             export_z2a,
             import_files,
             pool_export,

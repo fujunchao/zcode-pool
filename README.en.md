@@ -66,6 +66,8 @@ output and collapsible reasoning.
   switch, so no account is ever lost.
 - Supports both BigModel and z.ai sign-in. Adding an account never disturbs the login you are using.
 - Can relaunch ZCode automatically after a switch.
+- Batch management: multi-select accounts to **export the selection** (bundle v2, same format as single-account export)
+  or **delete them in bulk** (the confirmation lists every name; your current login is not affected).
 
 ### Quotas and plans
 
