@@ -48,9 +48,58 @@ pub struct RawMail {
 
 fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(10))
-        .timeout(Duration::from_secs(20))
+        .timeout_connect(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
         .build()
+}
+
+/// 这个自部署实例的连接质量不稳定：同一分钟内实测「第 1 次握手超时、第 2 次被 RST、第 3 次成功」。
+/// 单发失败会把注册流程直接逼成「手动粘贴链接」，所以统一做有限重试；
+/// 每次尝试的超时收紧（整体 10s / 建连 5s），保证「偶发一抖」十几秒内自愈。
+const ATTEMPTS: usize = 3;
+const RETRY_BASE_MS: u64 = 400;
+
+/// 网络层错误与 5xx 值得重试；4xx 是请求本身的问题，重试没意义。
+fn retryable(e: &ureq::Error) -> bool {
+    match e {
+        ureq::Error::Transport(_) => true,
+        ureq::Error::Status(code, _) => *code >= 500,
+        _ => false,
+    }
+}
+
+/// 写操作（建地址）只重试**连接层**错误：请求可能已经到达服务端并建好了地址，
+/// 对 5xx 重发有造出重复地址的风险。
+fn retryable_connect_only(e: &ureq::Error) -> bool {
+    matches!(e, ureq::Error::Transport(_))
+}
+
+/// 通用重试：`is_retryable` 判定哪些错误值得重试，退避 0.4s / 1.6s。
+/// 泛型 + 判定函数是为了能脱离网络单测（见 tests::retry_*）。
+fn with_retry<T, E>(
+    attempts: usize,
+    base_ms: u64,
+    mut f: impl FnMut() -> Result<T, E>,
+    is_retryable: impl Fn(&E) -> bool,
+) -> Result<T, E> {
+    let total = attempts.max(1);
+    let mut last: Option<E> = None;
+    for i in 0..total {
+        match f() {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                if !is_retryable(&e) {
+                    return Err(e);
+                }
+                last = Some(e);
+                if i + 1 < total {
+                    let step = (i as u64 + 1) * (i as u64 + 1);
+                    std::thread::sleep(Duration::from_millis(base_ms * step));
+                }
+            }
+        }
+    }
+    Err(last.unwrap())
 }
 
 pub fn norm_base(raw: &str) -> String {
@@ -87,14 +136,21 @@ pub fn create_address(cfg: &CfCfg, name: &str) -> Result<Created, String> {
         "name": name.trim(),
         "domain": cfg.domain.as_deref().unwrap_or("").trim(),
     });
-    let resp = agent()
-        .post(&cfg.url("/admin/new_address"))
-        .set("x-admin-auth", cfg.admin_password.trim())
-        .set("Content-Type", "application/json")
-        .send_json(body)
-        .map_err(|e| http_err("建地址失败", e))?
-        .into_string()
-        .map_err(|e| format!("建地址返回读取失败：{e}"))?;
+    let resp = with_retry(
+        ATTEMPTS,
+        RETRY_BASE_MS,
+        || {
+            agent()
+                .post(&cfg.url("/admin/new_address"))
+                .set("x-admin-auth", cfg.admin_password.trim())
+                .set("Content-Type", "application/json")
+                .send_json(body.clone())
+        },
+        retryable_connect_only,
+    )
+    .map_err(|e| http_err("建地址失败", e))?
+    .into_string()
+    .map_err(|e| format!("建地址返回读取失败：{e}"))?;
     let v: Value = serde_json::from_str(&resp).unwrap_or(Value::String(resp.clone()));
     let address = v.get("address").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
     let jwt = v.get("jwt").and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -118,13 +174,20 @@ pub fn probe(cfg: &CfCfg) -> Result<usize, String> {
     if !cfg.is_ready() {
         return Err("还没有配置临时邮箱服务（base URL / 管理员密码）".into());
     }
-    let resp = agent()
-        .get(&cfg.url("/admin/mails?limit=1&offset=0"))
-        .set("x-admin-auth", cfg.admin_password.trim())
-        .call()
-        .map_err(|e| http_err("连接测试失败", e))?
-        .into_string()
-        .map_err(|e| format!("连接测试返回读取失败：{e}"))?;
+    let resp = with_retry(
+        ATTEMPTS,
+        RETRY_BASE_MS,
+        || {
+            agent()
+                .get(&cfg.url("/admin/mails?limit=1&offset=0"))
+                .set("x-admin-auth", cfg.admin_password.trim())
+                .call()
+        },
+        retryable,
+    )
+    .map_err(|e| http_err("连接测试失败", e))?
+    .into_string()
+    .map_err(|e| format!("连接测试返回读取失败：{e}"))?;
     let v: Value = serde_json::from_str(&resp).unwrap_or(Value::String(resp));
     Ok(visible_count(&v))
 }
@@ -145,11 +208,18 @@ pub fn delete_address(cfg: &CfCfg, address_id: i64) -> Result<(), String> {
     if address_id == 0 {
         return Ok(());
     }
-    agent()
-        .delete(&cfg.url(&format!("/admin/delete_address/{address_id}")))
-        .set("x-admin-auth", cfg.admin_password.trim())
-        .call()
-        .map_err(|e| http_err("删地址失败", e))?;
+    with_retry(
+        ATTEMPTS,
+        RETRY_BASE_MS,
+        || {
+            agent()
+                .delete(&cfg.url(&format!("/admin/delete_address/{address_id}")))
+                .set("x-admin-auth", cfg.admin_password.trim())
+                .call()
+        },
+        retryable,
+    )
+    .map_err(|e| http_err("删地址失败", e))?;
     Ok(())
 }
 
@@ -163,13 +233,20 @@ pub fn fetch_mails(cfg: &CfCfg, address: &str, limit: usize) -> Result<Vec<RawMa
         limit.clamp(1, 50),
         urlencode(address.trim())
     ));
-    let resp = agent()
-        .get(&url)
-        .set("x-admin-auth", cfg.admin_password.trim())
-        .call()
-        .map_err(|e| http_err("取信失败", e))?
-        .into_string()
-        .map_err(|e| format!("取信返回读取失败：{e}"))?;
+    let resp = with_retry(
+        ATTEMPTS,
+        RETRY_BASE_MS,
+        || {
+            agent()
+                .get(&url)
+                .set("x-admin-auth", cfg.admin_password.trim())
+                .call()
+        },
+        retryable,
+    )
+    .map_err(|e| http_err("取信失败", e))?
+    .into_string()
+    .map_err(|e| format!("取信返回读取失败：{e}"))?;
     let v: Value = serde_json::from_str(&resp).unwrap_or(Value::String(resp));
     let arr = v
         .get("results")
@@ -627,6 +704,58 @@ https://chat.z.ai/auth/verify_email?token=verify-soft=\r\nbreak&x=1\r\n";
         let no_count: Value = serde_json::from_str(r#"{"results":[{},{}]}"#).unwrap();
         assert_eq!(visible_count(&no_count), 2);
         assert_eq!(visible_count(&Value::Null), 0);
+    }
+
+    /// 重试策略：网络抖动要重试、请求本身的错不要重试、用尽后返回最后一次的错
+    #[test]
+    fn retry_handles_transient_and_gives_up_on_permanent() {
+        use std::cell::Cell;
+
+        // 前两次"抖动"，第三次成功
+        let calls = Cell::new(0);
+        let r: Result<u8, String> = with_retry(
+            3,
+            0,
+            || {
+                calls.set(calls.get() + 1);
+                if calls.get() < 3 {
+                    Err("net".to_string())
+                } else {
+                    Ok(7)
+                }
+            },
+            |_| true,
+        );
+        assert_eq!(r.unwrap(), 7);
+        assert_eq!(calls.get(), 3, "应该试满三次才成功");
+
+        // 不可重试的错误：立刻返回，只调一次
+        let calls2 = Cell::new(0);
+        let r2: Result<u8, String> = with_retry(
+            3,
+            0,
+            || {
+                calls2.set(calls2.get() + 1);
+                Err("400 bad request".to_string())
+            },
+            |e| e != "400 bad request",
+        );
+        assert!(r2.is_err());
+        assert_eq!(calls2.get(), 1);
+
+        // 一直失败：最多 attempts 次，并返回最后一次的错误
+        let calls3 = Cell::new(0);
+        let r3: Result<u8, String> = with_retry(
+            2,
+            0,
+            || {
+                calls3.set(calls3.get() + 1);
+                Err(format!("try{}", calls3.get()))
+            },
+            |_| true,
+        );
+        assert_eq!(r3.unwrap_err(), "try2");
+        assert_eq!(calls3.get(), 2);
     }
 
     /// 真实样本的 Subject 就是 RFC2047 编码字，必须解出来（控制台里要能看懂）
