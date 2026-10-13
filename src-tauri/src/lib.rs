@@ -15,7 +15,7 @@ mod usage;
 mod zcrypto;
 
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 use store::*;
 use tauri::menu::{MenuBuilder, MenuItem};
@@ -427,9 +427,10 @@ struct PollCfg {
 }
 
 /// 并发生效：OAuth 流程按 flow 键控，允许多个注册窗口并存。
-static PENDING_OAUTH: Mutex<HashMap<String, PendingOAuth>> = Mutex::new(HashMap::new());
+/// 用 BTreeMap（::new 是 const，可作 static 初始化；规模 ≤5 无性能差异）。
+static PENDING_OAUTH: Mutex<BTreeMap<String, PendingOAuth>> = Mutex::new(BTreeMap::new());
 
-fn pending_oauth_guard() -> std::sync::MutexGuard<'static, HashMap<String, PendingOAuth>> {
+fn pending_oauth_guard() -> std::sync::MutexGuard<'static, BTreeMap<String, PendingOAuth>> {
     match PENDING_OAUTH.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
