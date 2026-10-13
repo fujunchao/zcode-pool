@@ -11,6 +11,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
+    env:
+      # 手动派发（非 tag）时兜底用的发布标签 —— **发版时只改这一处**：tagName 与便携版附件上传都读它
+      RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.2.5' }}
     strategy:
       fail-fast: false
       matrix:
@@ -50,7 +53,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.2.5' }}
+          tagName: ${{ env.RELEASE_TAG }}
           releaseName: 'Z·POOL ${{ github.ref_name }}'
           releaseBody: |
             本版改进
@@ -69,3 +72,22 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.target != '' && format('--target {0} ', matrix.target) || '' }}--bundles ${{ matrix.bundles }}
+
+      # 便携版（免安装裸 exe）原先只在 build 工作流的 artifact 里（要登录 GitHub 才能下），
+      # 这里额外把它附到同一个 release 上 —— 发布页直接给出「安装版」与「便携版」两种选择。
+      - name: Stage portable exe
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ver = (Get-Content package.json | ConvertFrom-Json).version
+          Copy-Item "src-tauri/target/release/zcode-pool.exe" "zcode-pool_${ver}_portable.exe"
+          Get-Item "zcode-pool_${ver}_portable.exe" | Select-Object Name, Length
+
+      - name: Attach portable exe to release
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ver = (Get-Content package.json | ConvertFrom-Json).version
+          gh release upload "${{ env.RELEASE_TAG }}" "zcode-pool_${ver}_portable.exe" --clobber
