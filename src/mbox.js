@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { t } from "./i18n.js";
 import { ic } from "./icons.js";
 import { esc, toast, openLineModal } from "./ui.js";
-import { regStart, regBatchSet } from "./reg.js";
+import { regStart, regBatchSet, regClose } from "./reg.js";
 
 let rerender = () => {};
 export function setMboxRerender(fn) {
@@ -15,9 +15,19 @@ const M = {
   list: [],
   filter: "all",
   sel: new Set(),
-  batch: { running: false, queue: [], total: 0, done: 0, current: "", results: [] },
+  conc: 2,
+  batch: { running: false, concurrency: 2, queue: [], total: 0, done: 0, active: new Map(), results: [] },
   lastRun: null,
 };
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 并发数从 main.js（state/settings）同步；运行中不可改，下一批生效。 */
+export function setMboxConc(n) {
+  const v = Math.min(5, Math.max(1, Number(n) || 2));
+  M.conc = v;
+  if (!M.batch.running) M.batch.concurrency = v;
+}
 
 export function mboxRunning() {
   return M.batch.running;
@@ -62,10 +72,11 @@ export function mboxPage() {
   const b = M.batch;
   const verified = M.list.filter((a) => a.status === "verified").length;
   const attention = M.list.filter((a) => a.status === "failed" || a.status === "invalid").length;
+  const activeList = [...b.active.values()].map((v) => v.email);
   const progress = b.running
     ? `<div class="prog">
          <div class="prog-bar"><i style="width:${b.total ? Math.round((b.done / b.total) * 100) : 0}%"></i></div>
-         <div class="prog-txt">${esc(t("mb.batch.progress", { done: b.done, total: b.total }))}${b.current ? ` · ${esc(b.current)}` : ""}</div>
+         <div class="prog-txt">${esc(t("mb.batch.progress", { done: b.done, total: b.total }))}${activeList.length ? ` · ${esc(t("mb.batch.active", { list: activeList.join(" · ") }))}` : ""}</div>
        </div>`
     : "";
   const rows = filtered();
@@ -119,6 +130,12 @@ export function mboxPage() {
       </select>
       <button class="btn" click="actions.mboxCfCreate()" title="${esc(t("mb.cfCreateTip"))}" ${b.running ? "disabled" : ""}>${ic("mail", 14)} ${t("mb.cfCreate")}</button>
       <button class="btn" click="actions.mboxExport()" ${M.list.length && !b.running ? "" : "disabled"}>${ic("export", 14)} ${t("mb.export")}</button>
+      <label class="conc-wrap" title="${esc(t("mb.concTip"))}">
+        <span>${esc(t("mb.conc"))}</span>
+        <select class="sel" id="mb-conc" aria-label="${esc(t("mb.conc"))}" ${b.running ? "disabled" : ""}>
+          ${[1, 2, 3, 4, 5].map((n) => `<option value="${n}" ${M.conc === n ? "selected" : ""}>${n}</option>`).join("")}
+        </select>
+      </label>
       <button class="btn" click="actions.mboxVerify()" ${!M.sel.size || b.running ? "disabled" : ""}>${ic("play", 14)} ${t("mb.verify")}${M.sel.size ? ` (${M.sel.size})` : ""}</button>
       <button class="btn" click="actions.mboxStop()" ${b.running ? "" : "disabled"}>${ic("power", 14)} ${t("mb.stop")}</button>
       <span class="spacer"></span>
@@ -368,78 +385,98 @@ export async function mboxVerify() {
     toast(t("mb.nothingToVerify"), "warn");
     return;
   }
-  M.batch = { running: true, queue: emails.slice(), total: emails.length, done: 0, current: "", results: [] };
+  regClose(); // 清掉上一批遗留的面板，重新开始
+  M.batch = {
+    running: true,
+    concurrency: M.conc,
+    queue: emails.slice(),
+    total: emails.length,
+    done: 0,
+    active: new Map(),
+    results: [],
+  };
   rerender();
-  runNext();
+  pump();
 }
 
-async function runNext() {
+/** 并发泵：有空位就补位启动，直到队列空且全部收口。 */
+async function pump() {
   const b = M.batch;
   if (!b.running) return;
-  if (!b.queue.length) return finishBatch();
+  while (b.running && b.active.size < b.concurrency && b.queue.length) {
+    await startOne();
+  }
+  if (b.running && !b.active.size && !b.queue.length) finishBatch();
+}
+
+async function startOne() {
+  const b = M.batch;
   const email = b.queue.shift();
-  b.current = email;
-  rerender();
+  if (!email) return;
+  // 错峰启动（并发 >1 时）：1.2s 起跳 + 随机抖动，避免同一秒齐发
+  if (b.concurrency > 1) await sleep(1200 + Math.floor(Math.random() * 800));
+  if (!b.running) return;
+  let flow = "";
   try {
-    regStart("register", "zai");
-    regBatchSet(email);
-    await invoke("oauth_begin", { provider: "zai", mode: "register", batch: true });
+    const r = await invoke("oauth_begin", { provider: "zai", mode: "register", batch: true, email });
+    flow = String((r && r.flow) || "");
+    if (!flow) throw new Error(t("m.unknownErr"));
   } catch (e) {
     const msg = String(e).replace(/^[a-z_]+:/, "");
     b.done += 1;
     b.results.push({ email, ok: false, error: msg });
-    await invoke("pool_mark_verified", { email, ok: false, note: msg }).catch(() => {});
-    setTimeout(runNext, 400);
+    invoke("pool_mark_verified", { email, ok: false, note: msg }).catch(() => {});
+    mboxLoad().then(rerender);
+    return;
   }
+  b.active.set(flow, { email });
+  regStart(flow, "register", "zai");
+  regBatchSet(flow, email);
+  rerender();
 }
 
-export function mboxOnOauthDone(email, ok, note) {
+/** 单任务收口（按 flow 配对）：OAuth 完成 / 跳过 / 关窗 共用。 */
+export function mboxOnFlowDone(flow, ok, note) {
   const b = M.batch;
-  if (!b.running || !email) return false;
+  if (!b.running || !flow) return false;
+  const info = b.active.get(flow);
+  if (!info) return false;
+  b.active.delete(flow);
   b.done += 1;
-  b.results.push({ email, ok, error: note || "" });
-  invoke("pool_mark_verified", { email, ok, note: note || null }).catch(() => {});
+  b.results.push({ email: info.email, ok, error: note || "" });
+  invoke("pool_mark_verified", { email: info.email, ok, note: note || null }).catch(() => {});
   mboxLoad().then(rerender);
-  setTimeout(runNext, 900);
+  setTimeout(pump, 400);
   return true;
+}
+
+/** reg.js 的终止回调（skip 按钮 / 窗口被用户关掉）：只对属于本批次的 flow 收口。 */
+export function mboxOnTerminated(flow, reason) {
+  const b = M.batch;
+  if (!b.running || !b.active.has(flow)) return;
+  if (reason === "skipped") {
+    const info = b.active.get(flow);
+    if (info) toast(t("mb.batch.skippedToast", { email: info.email }), "warn");
+  }
+  const note = reason === "closed" ? t("mb.batch.closedFail") : t("mb.batch.skipped");
+  mboxOnFlowDone(flow, false, note);
 }
 
 export function mboxStop() {
   const b = M.batch;
   if (!b.running) return;
   b.running = false;
-  b.current = "";
-  regBatchSet("");
-  invoke("reg_close_window").catch(() => {});
+  b.active.clear();
+  b.queue.length = 0;
+  invoke("reg_close_window", {}).catch(() => {});
   toast(t("mb.batch.stopped"), "warn");
   rerender();
-}
-
-export function mboxSkipCurrent() {
-  const b = M.batch;
-  if (!b.running || !b.current) {
-    toast(t("mb.batch.noCurrent"), "warn");
-    return;
-  }
-  const email = b.current;
-  b.current = "";
-  b.done += 1;
-  const note = t("mb.batch.skipped");
-  b.results.push({ email, ok: false, error: note });
-  invoke("pool_mark_verified", { email, ok: false, note }).catch(() => {});
-  regBatchSet("");
-  invoke("reg_close_window").catch(() => {});
-  toast(t("mb.batch.skippedToast", { email }), "warn");
-  mboxLoad().then(rerender);
-  setTimeout(runNext, 600);
 }
 
 function finishBatch() {
   const b = M.batch;
   const ok = b.results.filter((r) => r.ok).length;
   b.running = false;
-  b.current = "";
-  regBatchSet("");
   M.lastRun = { total: b.total, results: b.results.slice() };
   toast(t("mb.batch.done", { ok, total: b.total }), ok === b.total ? "ok" : "warn");
   rerender();
@@ -461,8 +498,4 @@ export async function mboxRetryFailed() {
 export function mboxDismissResult() {
   M.lastRun = null;
   rerender();
-}
-
-export function mboxCurrent() {
-  return M.batch.running ? M.batch.current : "";
 }

@@ -24,22 +24,40 @@ const PAGE_KEYS = {
 };
 
 const MAX_LOGS = 200;
+const CARD_LOGS = 3;
 
 const LINK_POLL_MS = 3000;
-const LINK_POLL_TRIES = 30; 
+const LINK_POLL_TRIES = 30;
 const LINK_MAX_AUTO = 3;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const shortMail = (s) => String(s || "").split("@")[0] || "";
 
-let S = null;
+/** 并发注册：每个 OAuth 流程（flow）一个 session，并行并存。 */
+let sessions = new Map();
 let drawer = null;
 let modal = null;
 let modalKind = null;
-let linkBusy = false;
+let modalFlow = null;
 
-let onSkip = null;
-export function setRegSkip(fn) {
-  onSkip = fn;
+/** 手动输入请求队列：并发时多个任务都要人工填单，按序弹出，不互相覆盖。 */
+let modalQueue = [];
+
+let onTerminated = null;
+export function setRegTerminated(fn) {
+  onTerminated = fn;
+}
+
+function terminate(flow, reason) {
+  if (onTerminated) onTerminated(flow, reason);
+}
+
+function shortFlow(flow) {
+  return String(flow || "").slice(0, 12);
+}
+
+function mailOf(s) {
+  return s.signupEmail || s.batchEmail || "";
 }
 
 function tr(group, key, params) {
@@ -53,16 +71,13 @@ function nowLabel() {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-function stepsFor(mode) {
-  return STEPS[mode] || STEPS.login;
-}
-
 export function regActive() {
-  return !!S;
+  return sessions.size > 0;
 }
 
-export function regStart(mode, provider) {
-  S = {
+export function regStart(flow, mode, provider) {
+  sessions.set(flow, {
+    flow,
     mode,
     provider,
     phase: "",
@@ -75,60 +90,76 @@ export function regStart(mode, provider) {
     batchEmail: "",
     linkAuto: 0,
     submittedAt: 0,
-  };
-  linkBusy = false;
-  pushLog("info", "connected", provider);
+    linkBusy: false,
+  });
+  pushLog(sessions.get(flow), "info", "connected", provider);
   render();
 }
 
-export function regBatchSet(email) {
-  if (S) S.batchEmail = email || "";
+export function regBatchSet(flow, email) {
+  const s = sessions.get(flow);
+  if (s) s.batchEmail = email || "";
 }
 
-export function regClose() {
-  closeModal();
-  S = null;
-  document.body.classList.remove("reg-open");
-  if (drawer) {
+/** 无参 = 全部关闭；带 flow = 只移除一个 session。 */
+export function regClose(flow) {
+  if (flow) {
+    sessions.delete(flow);
+    if (modalFlow === flow) closeModal();
+    modalQueue = modalQueue.filter((q) => q.flow !== flow);
+  } else {
+    sessions = new Map();
+    modalQueue = [];
+    closeModal();
+  }
+  if (!sessions.size && drawer) {
     drawer.remove();
     drawer = null;
+    document.body.classList.remove("reg-open");
+    return;
   }
+  render();
 }
 
 export function regEvent(ev) {
-  if (!S || !ev || typeof ev !== "object") return;
+  if (!ev || typeof ev !== "object") return;
+  const s = sessions.get(ev.flow);
+  if (!s) return;
   switch (ev.kind) {
     case "ready":
-      pushLog("info", "connected", ev.provider || S.provider);
+      pushLog(s, "info", "connected", ev.provider || s.provider);
       break;
     case "page":
-      pushLog("info", "page", tr("reg.page", PAGE_KEYS[ev.page] || "other"));
+      pushLog(s, "info", "page", tr("reg.page", PAGE_KEYS[ev.page] || "other"));
       break;
     case "phase":
-      S.phase = ev.phase;
-      if (ev.phase === "unsupported") S.failed = true;
+      s.phase = ev.phase;
+      if (ev.phase === "unsupported") s.failed = true;
       break;
     case "note":
-      S.note = !ev.code || ev.code === "clear" ? "" : tr("reg.note", ev.code, { a: ev.a });
+      s.note = !ev.code || ev.code === "clear" ? "" : tr("reg.note", ev.code, { a: ev.a });
       break;
     case "ask":
-      if (S.batchEmail) {
-        if (ev.ask === "signup") autoSignup();
-        else autoFetchLink();
+      if (s.batchEmail) {
+        if (ev.ask === "signup") autoSignup(s);
+        else autoFetchLink(s);
       } else if (ev.ask === "link") {
-        autoFetchLink();
+        autoFetchLink(s);
       } else {
-        openAsk(ev.ask);
+        enqueueAsk(s.flow, ev.ask);
       }
       break;
     case "log":
-      if (ev.code === "submitted") S.submittedAt = Date.now();
-      pushLog(ev.level || "info", ev.code, ev.a, ev.b);
+      if (ev.code === "submitted") s.submittedAt = Date.now();
+      pushLog(s, ev.level || "info", ev.code, ev.a, ev.b);
       break;
     case "closed":
-      S.closed = true;
-      S.note = "";
-      pushLog("warn", "windowClosed");
+      if (!s.closed) {
+        s.closed = true;
+        s.note = "";
+        pushLog(s, "warn", "windowClosed");
+        terminate(s.flow, "closed");
+      }
       break;
     default:
       return;
@@ -136,26 +167,27 @@ export function regEvent(ev) {
   render();
 }
 
-function pushLog(level, code, a, b) {
-  if (!S) return;
+function pushLog(s, level, code, a, b) {
+  if (!s) return;
   const text = tr("reg.log", code, { a: a || "", b: b || "" });
-  S.logs.push({ level, text, at: nowLabel() });
-  if (S.logs.length > MAX_LOGS) S.logs.splice(0, S.logs.length - MAX_LOGS);
+  s.logs.push({ level, text, at: nowLabel(), ts: Date.now(), mail: shortMail(mailOf(s)) });
+  if (s.logs.length > MAX_LOGS) s.logs.splice(0, s.logs.length - MAX_LOGS);
 }
 
-async function autoSignup() {
-  const email = S && S.batchEmail;
+async function autoSignup(s) {
+  const email = s && s.batchEmail;
   if (!email) return;
   try {
     const r = await invoke("pool_get", { email });
-    S.signupEmail = r.email;
+    s.signupEmail = r.email;
     await invoke("reg_input", {
+      flow: s.flow,
       ask: "signup",
       value: { name: randName(), email: r.email, password: r.password },
     });
-    pushLog("info", "batchSignup", r.email);
+    pushLog(s, "info", "batchSignup", r.email);
   } catch (e) {
-    pushLog("warn", "batchSignupFail", stripErr(e));
+    pushLog(s, "warn", "batchSignupFail", stripErr(e));
   }
   render();
 }
@@ -169,25 +201,25 @@ function isCredentialError(msg) {
   return /invalid_grant|AADSTS70000|AADSTS70008|AADSTS50173|AADSTS7000215/i.test(String(msg || ""));
 }
 
-async function autoFetchLink() {
-  if (!S || linkBusy) return;
-  const email = S.signupEmail;
-  if (!email) return startManualLink("noEmail");
-  if (S.linkAuto >= LINK_MAX_AUTO) return startManualLink("loop");
+async function autoFetchLink(s) {
+  if (!s || s.linkBusy) return;
+  const email = s.signupEmail;
+  if (!email) return startManualLink(s, "noEmail");
+  if (s.linkAuto >= LINK_MAX_AUTO) return startManualLink(s, "loop");
 
-  linkBusy = true;
-  pushLog("info", "fetchLinkStart", email);
+  s.linkBusy = true;
+  pushLog(s, "info", "fetchLinkStart", email);
   render();
 
-  const anchor = S.submittedAt || S.startedAt || Date.now();
+  const anchor = s.submittedAt || s.startedAt || Date.now();
   const sinceMs = anchor - 60_000;
 
   let link = "";
   let fail = "";
   let info = "";
-  for (let i = 0; i < LINK_POLL_TRIES && !S.closed; i++) {
+  for (let i = 0; i < LINK_POLL_TRIES && !s.closed; i++) {
     try {
-      const r = await invoke("reg_fetch_link", { email, limit: 15, since: sinceMs });
+      const r = await invoke("reg_fetch_link", { email, limit: 15, since: sinceMs, flow: s.flow });
       const links = (r && r.links) || [];
       if (links.length) {
         link = pickLink(links);
@@ -199,39 +231,39 @@ async function autoFetchLink() {
       fail = "";
     } catch (e) {
       fail = stripErr(e);
-      pushLog("warn", "fetchLinkErr", fail);
+      pushLog(s, "warn", "fetchLinkErr", fail);
       if (isCredentialError(fail)) {
         toast(t("reg.linkDead"), "err", fail);
-        if (onSkip) onSkip();
+        terminate(s.flow, "skipped");
         return;
       }
       break;
     }
-    pushLog("info", "fetchLinkPolling", String(Math.round(((i + 1) * LINK_POLL_MS) / 1000)), String(i + 1));
+    pushLog(s, "info", "fetchLinkPolling", String(Math.round(((i + 1) * LINK_POLL_MS) / 1000)), String(i + 1));
     render();
     await sleep(LINK_POLL_MS);
   }
-  linkBusy = false;
+  s.linkBusy = false;
 
-  if (!link) return startManualLink(fail || info || "timeout");
+  if (!link) return startManualLink(s, fail || info || "timeout");
 
-  S.linkAuto += 1;
+  s.linkAuto += 1;
   try {
-    await invoke("reg_input", { ask: "link", value: link });
-    pushLog("ok", "fetchLinkFound", link);
+    await invoke("reg_input", { flow: s.flow, ask: "link", value: link });
+    pushLog(s, "ok", "fetchLinkFound", link);
   } catch (e) {
-    pushLog("warn", "fetchLinkPushFail", stripErr(e));
-    startManualLink("pushFail");
+    pushLog(s, "warn", "fetchLinkPushFail", stripErr(e));
+    startManualLink(s, "pushFail");
   }
   render();
 }
 
-function startManualLink(reason) {
-  if (!S) return;
-  if (modalKind === "link") return; 
-  if (reason) pushLog("warn", "fetchLinkManual", reason);
+function startManualLink(s, reason) {
+  if (!s) return;
+  if (modal && modalFlow === s.flow && modalKind === "link") return;
+  if (reason) pushLog(s, "warn", "fetchLinkManual", reason);
   render();
-  openAsk("link");
+  enqueueAsk(s.flow, "link");
 }
 
 function modeLabel(mode) {
@@ -247,85 +279,125 @@ function ensureDrawer() {
   return drawer;
 }
 
-function statusOf() {
-  if (S.closed) return { key: "closed", cls: "off" };
-  if (S.failed) return { key: "attention", cls: "warn" };
-  if (S.phase === "done") return { key: "done", cls: "ok" };
+function statusOf(s) {
+  if (s.closed) return { key: "closed", cls: "off" };
+  if (s.failed) return { key: "attention", cls: "warn" };
+  if (s.phase === "done") return { key: "done", cls: "ok" };
   return { key: "live", cls: "run" };
 }
 
-function stepState(step) {
-  const list = stepsFor(S.mode);
-  const cur = list.indexOf(S.phase);
-  const idx = list.indexOf(step);
-  if (cur < 0) return "";
-  if (idx < cur) return "done";
-  if (idx === cur) return "cur";
-  return "";
+function stageText(s) {
+  if (!s.phase) return "";
+  const k = `reg.step.${s.phase}`;
+  return has(k) ? t(k) : "";
+}
+
+function logLine(l, withMail) {
+  const head = withMail && l.mail ? `${l.mail} ` : "";
+  return `
+    <div class="drw-line ${esc(l.level)}">
+      <span class="at">${esc(l.at)}</span>
+      <span class="tx">${esc(head + l.text)}</span>
+    </div>`;
 }
 
 function render() {
-  if (!S) return;
+  if (!sessions.size) return;
   const root = ensureDrawer();
   document.body.classList.add("reg-open");
-  const list = stepsFor(S.mode);
-  const status = statusOf();
+  const list = [...sessions.values()];
+  const single = list.length === 1;
+  const activeN = list.filter((s) => !s.closed && s.phase !== "done" && !s.failed).length;
+  const allEnded = list.every((s) => s.closed || s.phase === "done" || s.failed);
 
-  const stepsHtml = list.length
-    ? `<div class="drw-steps">${list.map((s) => `
-        <span class="drw-step ${stepState(s)}"><i></i>${esc(tr("reg.step", s))}</span>`).join("")}</div>`
+  const cardsHtml = list
+    .map((s) => {
+      const st = statusOf(s);
+      const mail = mailOf(s);
+      const busy = !s.closed && s.phase !== "done" && !s.failed;
+      return `
+    <div class="reg-task ${esc(st.cls)}">
+      <div class="reg-task-h">
+        <span class="dot ${esc(st.cls)}"></span>
+        <span class="reg-task-mail" title="${esc(mail || s.flow)}">${esc(mail || shortFlow(s.flow))}</span>
+        <span class="chip ${st.cls === "off" ? "off" : st.cls}">${esc(tr("reg.status", st.key))}</span>
+        ${stageText(s) ? `<span class="reg-task-stage">${esc(stageText(s))}</span>` : ""}
+        <span class="spacer"></span>
+        ${busy ? `<button class="btn sm" data-act="reveal" data-flow="${esc(s.flow)}" title="${esc(t("reg.btn.reveal"))}">${ic("play", 11)}</button>` : ""}
+        ${busy && s.batchEmail ? `<button class="btn sm" data-act="skip" data-flow="${esc(s.flow)}">${ic("x", 11)} ${esc(t("reg.btn.skip"))}</button>` : ""}
+      </div>
+      ${s.note ? `<div class="reg-task-note">${ic("alert", 13)}<span>${esc(s.note)}</span></div>` : ""}
+      <div class="reg-task-logs">${s.logs.slice(-CARD_LOGS).map((l) => logLine(l, false)).join("")}</div>
+    </div>`;
+    })
+    .join("");
+
+  const allLogs = list
+    .flatMap((s) => s.logs)
+    .sort((a, b) => a.ts - b.ts)
+    .slice(-MAX_LOGS);
+  const withMail = !single;
+
+  const singleFlow = single ? list[0].flow : "";
+  const barHtml = single
+    ? `<div class="bar" style="border-bottom:1px solid var(--line);padding:9px 14px;gap:6px">
+        ${list[0].mode === "register" ? "" : `<button class="btn sm" data-act="to-register">${ic("userPlus", 12)} ${esc(t("reg.btn.toRegister"))}</button>`}
+        <button class="btn sm" data-act="reveal" data-flow="${esc(singleFlow)}">${ic("play", 12)} ${esc(t("reg.btn.reveal"))}</button>
+        <button class="btn sm" data-act="retry" data-flow="${esc(singleFlow)}">${ic("refresh", 12)} ${esc(t("reg.btn.retry"))}</button>
+        ${list[0].batchEmail ? `<button class="btn sm" data-act="skip" data-flow="${esc(singleFlow)}">${ic("x", 12)} ${esc(t("reg.btn.skip"))}</button>` : ""}
+      </div>`
     : "";
-
-  const logsHtml = S.logs.map((l) => `
-    <div class="drw-line ${esc(l.level)}">
-      <span class="at">${esc(l.at)}</span>
-      <span class="tx">${esc(l.text)}</span>
-    </div>`).join("");
 
   root.innerHTML = `
     <div class="drw-h">
-      <span class="dot ${status.cls}"></span>
-      <span class="drw-title">${esc(t("reg.title"))} · ${esc(modeLabel(S.mode))}</span>
-      <span class="chip new">${esc(S.provider || "")}</span>
+      <span class="dot ${allEnded ? "ok" : "run"}"></span>
+      <span class="drw-title">${esc(t("reg.title"))} · ${esc(modeLabel(list[0].mode))}</span>
+      ${list.length > 1 ? `<span class="chip new">${esc(t("reg.runningCount", { n: activeN }))}</span>` : ""}
       <span class="spacer"></span>
-      <span class="drw-status ${status.cls}">${esc(tr("reg.status", status.key))}</span>
       <button class="iconbtn" data-act="close" title="${esc(t("reg.btn.close"))}" style="color:var(--ink-2)">${ic("x", 14)}</button>
     </div>
-    <div class="bar" style="border-bottom:1px solid var(--line);padding:9px 14px;gap:6px">
-      ${S.mode === "register" ? "" : `<button class="btn sm" data-act="to-register">${ic("userPlus", 12)} ${esc(t("reg.btn.toRegister"))}</button>`}
-      <button class="btn sm" data-act="reveal">${ic("play", 12)} ${esc(t("reg.btn.reveal"))}</button>
-      <button class="btn sm" data-act="retry">${ic("refresh", 12)} ${esc(t("reg.btn.retry"))}</button>
-      ${S.batchEmail ? `<button class="btn sm" data-act="skip">${ic("x", 12)} ${esc(t("reg.btn.skip"))}</button>` : ""}
-    </div>
-    ${S.note ? `<div class="drw-note">${ic("alert", 14)}<span>${esc(S.note)}</span></div>` : ""}
-    ${stepsHtml}
-    <div class="drw-log" id="reg-log">${logsHtml || `<div class="drw-line"><span class="tx" style="color:var(--ink-3)">${esc(t("reg.waiting"))}</span></div>`}</div>
-    ${S.closed ? `<div style="padding:14px"><button class="btn g" data-act="close">${esc(t("reg.btn.close"))}</button></div>` : ""}
+    ${barHtml}
+    <div class="reg-tasks">${cardsHtml}</div>
+    <div class="drw-log" id="reg-log">${allLogs.map((l) => logLine(l, withMail)).join("") || `<div class="drw-line"><span class="tx" style="color:var(--ink-3)">${esc(t("reg.waiting"))}</span></div>`}</div>
+    ${list.every((s) => s.closed) ? `<div style="padding:14px"><button class="btn g" data-act="close">${esc(t("reg.btn.close"))}</button></div>` : ""}
   `;
 
   const log = root.querySelector("#reg-log");
   if (log) log.scrollTop = log.scrollHeight;
 
   root.querySelectorAll("[data-act]").forEach((b) => {
-    b.addEventListener("click", () => onAction(b.dataset.act));
+    b.addEventListener("click", () => onAction(b.dataset.act, b.dataset.flow));
   });
 }
 
-async function onAction(act) {
+function doSkip(flow) {
+  const s = sessions.get(flow);
+  if (s && !s.failed && !s.closed && s.phase !== "done") {
+    s.failed = true;
+    s.note = "";
+    pushLog(s, "warn", "skipFlow");
+    render();
+  }
+  terminate(flow, "skipped");
+}
+
+async function onAction(act, flow) {
   if (act === "close") return regClose();
+  if (act === "skip") return doSkip(flow);
   try {
-    if (act === "reveal") await invoke("reg_action", { action: "reveal" });
+    if (act === "reveal") await invoke("reg_action", { flow, action: "reveal" });
     else if (act === "retry") {
-      S.failed = false;
-      await invoke("reg_action", { action: "retry" });
-    } else if (act === "skip") {
-      if (onSkip) onSkip();
-      return; 
+      const s = sessions.get(flow);
+      if (s) s.failed = false;
+      await invoke("reg_action", { flow, action: "retry" });
     } else if (act === "to-register") {
-      const m = await invoke("reg_set_mode", { mode: "register" });
-      S.mode = m;
-      S.note = "";
-      S.logs.push({ level: "info", text: tr("reg.log", "modeSwitch", { a: modeLabel(m) }), at: nowLabel() });
+      const m = await invoke("reg_set_mode", { flow, mode: "register" });
+      const s = sessions.get(flow);
+      if (s) {
+        s.mode = m;
+        s.note = "";
+        s.logs.push({ level: "info", text: tr("reg.log", "modeSwitch", { a: modeLabel(m) }), at: nowLabel(), ts: Date.now(), mail: shortMail(mailOf(s)) });
+      }
     }
   } catch (e) {
     toast(String(e).replace(/^[a-z_]+:/, ""), "err");
@@ -339,6 +411,25 @@ function closeModal() {
     modal = null;
   }
   modalKind = null;
+  modalFlow = null;
+}
+
+/** 单例 modal 的排队：并发任务的“人工填单”请求按序弹出。 */
+function enqueueAsk(flow, kind) {
+  if (modal && modalFlow === flow && modalKind === kind) return;
+  if (modalQueue.some((q) => q.flow === flow && q.kind === kind)) return;
+  modalQueue.push({ flow, kind });
+  pumpModal();
+}
+
+function pumpModal() {
+  if (modal) return;
+  while (modalQueue.length) {
+    const next = modalQueue.shift();
+    if (!sessions.has(next.flow)) continue;
+    openAsk(next.flow, next.kind);
+    return;
+  }
 }
 
 function field(id, label, type, placeholder, extra = "") {
@@ -396,8 +487,9 @@ async function fillFromPool(mask, email) {
   }
 }
 
-function openAsk(kind) {
+function openAsk(flow, kind) {
   closeModal();
+  modalFlow = flow;
   modalKind = kind;
   const isSignup = kind === "signup";
   const mask = document.createElement("div");
@@ -439,7 +531,10 @@ function openAsk(kind) {
   }
 
   const err = mask.querySelector(".errline");
-  const close = () => { closeModal(); };
+  const close = () => {
+    closeModal();
+    pumpModal();
+  };
   mask.addEventListener("click", (e) => { if (e.target === mask) close(); });
   mask.querySelector(".reg-cancel").addEventListener("click", close);
 
@@ -447,6 +542,11 @@ function openAsk(kind) {
   if (first) first.focus();
 
   const submit = async () => {
+    const s = sessions.get(flow);
+    if (!s) {
+      closeModal();
+      return;
+    }
     let value;
     if (isSignup) {
       const name = mask.querySelector("#reg-name").value.trim();
@@ -454,22 +554,23 @@ function openAsk(kind) {
       const password = mask.querySelector("#reg-pw").value;
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return (err.textContent = t("reg.err.email"));
       if (password.length < 6) return (err.textContent = t("reg.err.password"));
-      S.signupEmail = email;
+      s.signupEmail = email;
       value = { name, email, password };
     } else {
       const link = mask.querySelector("#reg-link").value.trim();
       if (!/^https?:\/\//i.test(link)) return (err.textContent = t("reg.err.link"));
-      S.linkAuto = LINK_MAX_AUTO;
+      s.linkAuto = LINK_MAX_AUTO;
       value = link;
     }
     const go = mask.querySelector(".reg-go");
     go.disabled = true;
     try {
-      await invoke("reg_input", { ask: kind, value });
+      await invoke("reg_input", { flow, ask: kind, value });
       closeModal();
-      pushLog("info", isSignup ? "submittedSignup" : "submittedLink");
+      pushLog(s, "info", isSignup ? "submittedSignup" : "submittedLink");
       render();
       if (drawer) drawer.scrollIntoView({ block: "end" });
+      pumpModal();
     } catch (e) {
       err.textContent = String(e).replace(/^[a-z_]+:/, "");
       go.disabled = false;

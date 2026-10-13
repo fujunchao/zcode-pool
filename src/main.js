@@ -3,12 +3,12 @@ import { listen } from "@tauri-apps/api/event";
 import { esc, toast, openConfirmModal, openAddAccountModal, installDelegation } from "./ui.js";
 import { ic } from "./icons.js";
 import { init, t, has, lang, localeTag, stripErr } from "./i18n.js";
-import { regActive, regStart, regClose, regEvent, setRegSkip } from "./reg.js";
+import { regActive, regStart, regClose, regEvent, setRegTerminated } from "./reg.js";
 import {
   setMboxRerender, mboxLoad, mboxPage, mboxFilter, mboxToggle, mboxImport,
-  mboxRemove, mboxDelete, mboxSelection, mboxVerify, mboxStop, mboxOnOauthDone, mboxRunning, mboxCurrent, mboxStats,
+  mboxRemove, mboxDelete, mboxSelection, mboxVerify, mboxStop, mboxOnFlowDone, mboxRunning, mboxStats,
   mboxSelectAll, mboxSelectNone, mboxToggleRow, mboxExport, mboxRetryFailed, mboxDismissResult, mboxUpdateLine, mboxReauth,
-  mboxCfCreate, mboxSkipCurrent,
+  mboxCfCreate, mboxOnTerminated, setMboxConc,
 } from "./mbox.js";
 
 const $app = document.getElementById("app");
@@ -635,7 +635,7 @@ const actions = {
         try {
           if (regActive()) regClose();
           const r = await invoke("oauth_begin", { provider, mode });
-          regStart(r?.mode || mode, provider);
+          regStart(r?.flow || "manual", r?.mode || mode, provider);
           toast(t("m.loginWindowOpened"), "ok", mode === "register" ? t("m.loginWindowRegDetail") : t("m.loginWindowDetail"));
         } catch (e) {
           toast(stripErr(e), "err");
@@ -1484,6 +1484,7 @@ function render() {
   }
   const s = state;
   acctPruneSel();
+  setMboxConc(s.reg_concurrency ?? 2);
   const active = s.accounts.find((a) => a.is_active) || null;
   const unsaved = s.live_logged_in && !active;
 
@@ -1605,7 +1606,7 @@ window.onRenameKey = (e, id) => {
 };
 installDelegation();
 setMboxRerender(() => { if (!uiLocked()) render(); });
-setRegSkip(() => mboxSkipCurrent());
+setRegTerminated((flow, reason) => mboxOnTerminated(flow, reason));
 
 document.addEventListener("change", (e) => {
   const el = e.target;
@@ -1614,6 +1615,12 @@ document.addEventListener("change", (e) => {
   const acbx = el.closest ? el.closest(".acct-check") : null;
   if (acbx) { acctToggle(acbx.dataset.id, acbx.checked); render(); return; }
   if (el.id === "mb-all") { mboxSelectAll(el.checked); return; }
+  if (el.id === "mb-conc") {
+    const n = Number(el.value) || 2;
+    setMboxConc(n);
+    invoke("set_reg_concurrency", { n }).catch(() => {});
+    return;
+  }
   const cb = el.closest ? el.closest(".mb-check") : null;
   if (!cb) return;
   mboxToggle(cb.dataset.email, cb.checked);
@@ -1683,26 +1690,26 @@ listen("captcha://interactive", () => {
 
 listen("oauth://done", (ev) => {
   const p = ev.payload || {};
-  if (mboxRunning() && (p.ok !== false || !p.soft)) {
-    mboxOnOauthDone(mboxCurrent(), p.ok !== false, p.ok === false ? (p.error || "") : "");
+  if (mboxRunning() && p.flow && (p.ok !== false || !p.soft)) {
+    mboxOnFlowDone(p.flow, p.ok !== false, p.ok === false ? (p.error || "") : "");
     return;
   }
   if (p.ok === false) {
     if (p.soft) {
-      regEvent({ kind: "log", level: "warn", code: "oauthSoft", a: p.error || t("m.unknownErr") });
+      regEvent({ kind: "log", level: "warn", code: "oauthSoft", a: p.error || t("m.unknownErr"), flow: p.flow });
       toast(t("m.oauthSoft", { err: p.error || t("m.unknownErr") }), "warn", t("m.oauthSoftDetail"));
       return;
     }
-    regEvent({ kind: "log", level: "error", code: "oauthFail", a: p.error || t("m.unknownErr") });
+    regEvent({ kind: "log", level: "error", code: "oauthFail", a: p.error || t("m.unknownErr"), flow: p.flow });
     toast(t("m.oauthFail", { err: p.error || t("m.unknownErr") }), "err");
     return;
   }
   if (p.duplicate) {
-    regEvent({ kind: "log", level: "warn", code: "oauthDup", a: p.name || "" });
+    regEvent({ kind: "log", level: "warn", code: "oauthDup", a: p.name || "", flow: p.flow });
     toast(t("m.oauthDup", { name: p.name }), "warn", t("m.oauthDupDetail"));
     return;
   }
-  regEvent({ kind: "log", level: "ok", code: "oauthDone", a: p.name || "" });
+  regEvent({ kind: "log", level: "ok", code: "oauthDone", a: p.name || "", flow: p.flow });
   toast(t("m.oauthOk", { name: p.name }), "ok", t("m.oauthOkDetail"));
   refresh().then(() => { if (!uiLocked()) { render(); enrollAccounts(); } }).catch(() => {});
 });
