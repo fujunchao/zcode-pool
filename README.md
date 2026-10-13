@@ -121,6 +121,7 @@ npm run dist
 - 账号库、邮箱池与设置均保存在 `~/.zcode-pool/` 目录，全部为本地数据。
 - `mail.json` 以明文保存邮箱密码与 refresh token，请勿提交至版本库或对外分享。
 - 导出账号时仅包含 z.ai / BigModel 的登录凭据、供应商配置与设备标识；第三方供应商密钥、SSH 密码及中继凭据会被剔除。
+- 「导出到 zcode2api-plus」生成对方专用的 `providers` v1 导入文件：只有账号名与登录 JWT（加密凭据会先在本机解密，解不开或不是 JWT 的账号会被跳过并列出）；不含邮箱、供应商配置与设备身份。
 - 反代默认只监听 `127.0.0.1`；切到局域网可访问时**必须**至少配置一个 API Key，否则拒绝启动监听。
 - 使用记录里的 API Key 只保留前 8 位，不落全量密钥。
 - 运行日志位于 `%LOCALAPPDATA%\com.zpool.app\logs\oauth.log`。

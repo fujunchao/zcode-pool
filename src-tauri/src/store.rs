@@ -1396,6 +1396,41 @@ pub fn export_bundle_value(accounts: &[Account]) -> Value {
     })
 }
 
+/// zcode2api-plus 专用导出：载荷 + 逐项结果。
+#[derive(Debug, Default)]
+pub struct Z2aExport {
+    pub payload: Value,
+    pub included: Vec<String>,
+    pub skipped: Vec<String>,
+}
+
+/// 生成 zcode2api-plus 的 `providers` v1 导入载荷：`{providers:{zai:[{name,secret}]}}`。
+/// 只收 3 段式 JWT（与对方 model.Create 的判定一致）：明文直接用；
+/// `enc:v1:` 先按本机 fallback 口令解密（与客户端同一密钥派生）；缺 token / 解不开 / 非 JWT
+/// 一律计入 skipped —— 绝不把密文原样写进导出文件（对方会把非 JWT 静默存成 apiKey 废号）。
+pub fn export_z2a_value(paths: &Paths, accounts: &[Account]) -> Z2aExport {
+    let mut items = Vec::new();
+    let mut included = Vec::new();
+    let mut skipped = Vec::new();
+    for a in accounts {
+        let jwt = cred_plain(&a.credentials, "zcodejwttoken", &paths.home)
+            .map(|t| t.trim().to_string())
+            .filter(|t| t.split('.').count() == 3);
+        match jwt {
+            Some(t) => {
+                items.push(json!({ "name": a.name, "secret": t }));
+                included.push(a.name.clone());
+            }
+            None => skipped.push(a.name.clone()),
+        }
+    }
+    Z2aExport {
+        payload: json!({ "providers": { "zai": items } }),
+        included,
+        skipped,
+    }
+}
+
 struct ImportCandidate {
     name: Option<String>,
     creds: Value,

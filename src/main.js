@@ -433,6 +433,26 @@ const actions = {
       },
     });
   },
+  async exportZ2a() {
+    openConfirmModal({
+      kind: "warn",
+      icon: "send",
+      title: t("m.z2aTitle", { count: (state?.accounts || []).length }),
+      desc: t("m.z2aWhat"),
+      yesLabel: t("m.exportPick"),
+      onYes: async () => {
+        try {
+          const p = await invoke("export_z2a");
+          if (!p.picked) { toast(t("m.exportCanceled")); return; }
+          const skipped = p.skipped || [];
+          const extra = skipped.length
+            ? `${p.path} ｜ ${t("m.z2aSkipped", { count: skipped.length, names: skipped.join(t("common.listSep")) })}`
+            : p.path;
+          toast(t("m.z2aSaved", { count: p.count }), "ok", extra);
+        } catch (e) { toast(stripErr(e), "err"); }
+      },
+    });
+  },
   async importFiles() {
     try {
       const report = await invoke("import_files");
@@ -1446,6 +1466,7 @@ function render() {
         <button class="btn-ghost has-ic" click="actions.addAccount()" title="${t("btn.addAccountTitle")}">${ic("userPlus", 16)} ${t("btn.addAccount")}</button>
         <button class="btn-ghost has-ic" click="actions.importFiles()" title="${t("s.importBtn")}">${ic("import", 16)} ${t("btn.import")}</button>
         <button class="btn-ghost has-ic" click="actions.exportAll()" ${s.accounts.length ? "" : "disabled"} title="${t("s.exportAllBtn")}">${ic("exportAll", 16)} ${t("btn.export")}</button>
+        <button class="btn-ghost has-ic" click="actions.exportZ2a()" ${s.accounts.length ? "" : "disabled"} title="${t("s.exportZ2aBtn")}">${ic("send", 16)} ${t("btn.exportZ2a")}</button>
         ${s.zcode_running
           ? `<button class="btn-ghost has-ic" click="actions.askKill()" title="${t("btn.killZcode")}">${ic("power", 16)} ${t("btn.killZcode")}</button>`
           : s.zcode_path_ok

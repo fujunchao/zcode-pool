@@ -11,6 +11,7 @@ const ICONS = {
   import: `<path d="M10 3.4v8.2"/><path d="M6.6 8.4 10 11.8l3.4-3.4"/><path d="M4 16.6h12"/>`,
   export: `<path d="M10 12.6V4.4"/><path d="M6.6 7.8 10 4.4l3.4 3.4"/><path d="M4 16.6h12"/>`,
   exportAll: `<path d="M4 16.6h12"/><path d="M6.6 13.4h6.8"/><path d="M10 3.4v6"/><path d="M7.2 6 10 3.2 12.8 6"/>`,
+  send: `<path d="M18.3 1.7 12.5 18.3 9.2 10.8 1.7 7.5z"/><path d="M18.3 1.7 9.2 10.8"/>`,
   capture: `<path d="M10 3.4v8.2"/><path d="M6.6 8.4 10 11.8l3.4-3.4"/><path d="M4 16.6h12"/>`,
 
   play: `<path d="M7 5.4 15 10l-8 4.6z" fill="currentColor" stroke="none"/>`,

@@ -129,6 +129,7 @@ After editing i18n strings, `npm run check:i18n` verifies that the Chinese and E
 - Accounts, mailboxes and settings live under `~/.zcode-pool/`. Everything stays local.
 - `mail.json` stores mailbox passwords and refresh tokens in plain text. Do not commit it or share it.
 - Exported accounts contain only z.ai / BigModel credentials, provider config and the device identity. Third-party provider keys, SSH passwords and relay credentials are stripped.
+- "Export to zcode2api-plus" produces a `providers` v1 import file for that project: account names and login JWTs only (encrypted credentials are decrypted locally first; undecryptable or non-JWT accounts are skipped and listed). No email, provider config or device identity is included.
 - The relay listens on `127.0.0.1` only by default. Binding it to a LAN-reachable address **requires** at least one API key, or the listener is refused.
 - Usage records keep only the first 8 characters of an API key — never the full secret.
 - Logs are written to `%LOCALAPPDATA%\com.zpool.app\logs\oauth.log`.

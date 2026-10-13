@@ -226,6 +226,25 @@ pub fn run(args: &[String]) -> (String, i32) {
                 Err(e) => return (err(&e), 1),
             }
         }
+        "export-z2a" => {
+            let Some(out_path) = flag(rest, "--out") else {
+                return (err(&crate::i18n::tr("cli.usage.export_z2a")), 2);
+            };
+            match list_accounts(&paths).map(|a| export_z2a_value(&paths, &a)) {
+                Ok(out) => match atomic_write(
+                    std::path::Path::new(&out_path),
+                    &(serde_json::to_string_pretty(&out.payload).unwrap() + "\n"),
+                ) {
+                    Ok(()) => ok(json!({
+                        "out": out_path,
+                        "count": out.included.len(),
+                        "skipped": out.skipped,
+                    })),
+                    Err(e) => return (err(&crate::i18n::trf("err.write", &[("e", &e)])), 1),
+                },
+                Err(e) => return (err(&e), 1),
+            }
+        }
         "import" => {
             let Some(file) = flag(rest, "--file") else {
                 return (err(&crate::i18n::tr("cli.usage.import")), 2);

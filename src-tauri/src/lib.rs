@@ -1593,6 +1593,39 @@ async fn export_all(app: AppHandle) -> Result<serde_json::Value, String> {
     Ok(json!({ "picked": true, "path": path.to_string_lossy(), "count": accounts.len() }))
 }
 
+/// 导出为 zcode2api-plus 的 providers v1 导入文件（可直接在其管理台上传导入）。
+/// 与 export_all 的形状不同：只含账号名 + 登录 JWT，供对方 ImportAccounts 消费。
+#[tauri::command]
+async fn export_z2a(app: AppHandle) -> Result<serde_json::Value, String> {
+    let paths = Paths::detect();
+    let accounts = list_accounts(&paths)?;
+    if accounts.is_empty() {
+        return Err(i18n::tr("err.export.empty"));
+    }
+    let out = store::export_z2a_value(&paths, &accounts);
+    if out.included.is_empty() {
+        return Err(i18n::trf("err.z2a.none", &[("n", &accounts.len().to_string())]));
+    }
+    let picked = app
+        .dialog()
+        .file()
+        .add_filter(&i18n::tr("dialog.json"), &["json"])
+        .set_file_name("zcode2api-plus-accounts.json")
+        .blocking_save_file();
+    let Some(fp) = picked else {
+        return Ok(json!({ "picked": false }));
+    };
+    let path = fp.into_path().map_err(|e| i18n::trf("err.path.invalid", &[("e", &e.to_string())]))?;
+    let body = serde_json::to_string_pretty(&out.payload).unwrap() + "\n";
+    store::atomic_write(&path, &body).map_err(|e| i18n::trf("err.write", &[("e", &e.to_string())]))?;
+    Ok(json!({
+        "picked": true,
+        "path": path.to_string_lossy(),
+        "count": out.included.len(),
+        "skipped": out.skipped,
+    }))
+}
+
 #[tauri::command]
 async fn import_files(app: AppHandle) -> Result<ImportReport, String> {
     let picked = app
@@ -1796,6 +1829,7 @@ pub fn run() {
             autostart_set,
             export_one,
             export_all,
+            export_z2a,
             import_files,
             pool_export,
             set_cf_settings,
