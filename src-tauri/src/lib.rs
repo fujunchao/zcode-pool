@@ -672,7 +672,8 @@ async fn oauth_begin(
     .min_inner_size(420.0, 560.0)
     .resizable(true)
     .focused(!auto)
-    .user_agent(oauth::LOGIN_WINDOW_UA)
+    // UA 不做覆盖：使用 WebView2 默认 UA（= Edge 真实 UA，随内核升级自动更新）。
+    // 曾写死 Chrome/131 假 UA（与内核脱节、且覆盖 UA 会清掉 Sec-CH-UA-* 提示头），2026-10-14 移除。
     .initialization_script(&driver_script)
     .data_directory(profile_dir);
     if let Some(u) = proxy_url {

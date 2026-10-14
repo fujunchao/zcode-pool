@@ -5,7 +5,30 @@ use std::time::Duration;
 const TOKEN_URL: &str = "https://zcode.z.ai/api/v1/oauth/token";
 const FLOW_INIT_URL: &str = "https://zcode.z.ai/api/v1/oauth/cli/init";
 pub const FLOW_TIMEOUT_MS: u64 = 300_000;
-pub const LOGIN_WINDOW_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0";
+
+/// 与当前 WebView2 内核一致的浏览器 UA（供 Rust 侧「类浏览器」请求使用）。
+///
+/// 背景（2026-10-14）：登录窗口已不再覆盖 UA，改用 WebView2 默认值 —— 即 Edge 浏览器的
+/// 真实 UA（`CoreWebView2Settings.UserAgent` 的默认值；程序覆盖 UA 还会清掉 Sec-CH-UA-*
+/// 客户端提示头）。此前写死的 `Chrome/131.0.0.0` 属「与内核脱节的假 UA」（当时内核实为
+/// 155），是上游风控可注意到的特征之一。本函数让 Rust 侧（ureq）请求的 UA 也跟随内核
+/// 版本动态生成；取不到版本时不设置该头（宁缺毋滥）。
+#[cfg(target_os = "windows")]
+pub fn browser_ua() -> Option<String> {
+    let v = tauri::webview_version().ok()?;
+    let v = v.trim();
+    if v.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{v} Safari/537.36 Edg/{v}"
+    ))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn browser_ua() -> Option<String> {
+    None
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct OAuthProvider {
@@ -397,15 +420,14 @@ pub fn fetch_userinfo(provider: &str, token: &str) -> Option<Value> {
     } else {
         token.to_string()
     };
-    let resp = web_agent()
+    let mut req = web_agent()
         .get(url)
         .set("Authorization", &auth)
-        .set("Content-Type", "application/json")
-        .set("User-Agent", LOGIN_WINDOW_UA)
-        .call()
-        .ok()?
-        .into_string()
-        .ok()?;
+        .set("Content-Type", "application/json");
+    if let Some(ua) = browser_ua() {
+        req = req.set("User-Agent", &ua);
+    }
+    let resp = req.call().ok()?.into_string().ok()?;
     let v: Value = serde_json::from_str(&resp).ok()?;
     if v.get("code").and_then(|c| c.as_i64()).map(|c| c != 0).unwrap_or(false) {
         return None;
