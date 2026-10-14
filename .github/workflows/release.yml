@@ -13,7 +13,7 @@ jobs:
       contents: write
     env:
       # 手动派发（非 tag）时兜底用的发布标签 —— **发版时只改这一处**：tagName 与便携版附件上传都读它
-      RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.2.8' }}
+      RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.2.9' }}
     strategy:
       fail-fast: false
       matrix:
@@ -58,11 +58,13 @@ jobs:
           releaseBody: |
             本版改进
 
-            - **登录窗口自动平铺**：并行注册时登录窗口不再层叠遮挡——每打开一个新窗口，会把
-              当时所有登录窗口一起排成互不重叠的网格、整组居中在主窗口所在的屏幕上（自动避开
-              任务栏）。2~3 并发时一排并开，滑验证码无需再手动摆窗口。
-            - 注册助手抽屉工具栏新增 **「整理窗口」** 按钮（多任务时显示）：窗口被手动拖乱后，
-              一键重新平铺归位。
+            - **登录窗口不再覆盖 UA**：改用 WebView2 默认值（即 Edge 浏览器的真实 UA），随内核
+              升级自动更新。此前写死的 Chrome/131 假 UA（与内核实为 155 脱节、且覆盖 UA 会清掉
+              Sec-CH-UA-* 客户端提示头）已移除。
+            - `fetch_userinfo` 的 UA 同步改为跟随 WebView2 内核版本动态生成。
+
+            （背景：近期出现注册窗口连接被上游重置、页面打不开的情况；本版消除窗口侧「假 UA」
+            特征、改善请求特征真实性。若仍遇到打不开，多为上游临时风控，隔一段时间重试即可。）
 
             下载：Windows `*_x64-setup.exe` · macOS `*_universal.dmg` · Linux `*.deb` / `*.AppImage`
 
