@@ -3,14 +3,24 @@ import fs from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-async function panel() {
+async function panel({ invoke = async () => ({}) } = {}) {
   const nodes = [], listeners = new Map();
   const classList = { add() {}, remove() {}, toggle() {} };
   const document = {
     body: { classList, appendChild() {} }, documentElement: {},
-    addEventListener() {}, querySelector() { return null; },
+    addEventListener() {}, querySelector(selector) { return selector === ".toasts" ? nodes.find(n => n.className === "toasts") : null; },
     createElement() {
-      const el = { innerHTML: "", classList, addEventListener() {}, querySelector() { return null; }, querySelectorAll() { return []; }, remove() {} };
+      const el = {
+        innerHTML: "", classList, addEventListener() {}, appendChild() {}, querySelector() { return null; }, remove() {},
+        querySelectorAll(selector) {
+          if (selector !== "[data-act]") return [];
+          el.buttons = [...el.innerHTML.matchAll(/<button\b[^>]*\bdata-act="([^"]+)"[^>]*>/g)].map(([tag, act]) => ({
+            dataset: { act, flow: tag.match(/data-flow="([^"]+)"/)?.[1] },
+            addEventListener(name, callback) { if (name === "click") this.click = callback; },
+          }));
+          return el.buttons;
+        },
+      };
       nodes.push(el);
       return el;
     },
@@ -27,7 +37,7 @@ async function panel() {
   await main.link((specifier, ref) => {
     if (specifier.startsWith("@tauri-apps/api/")) {
       return new vm.SyntheticModule(["invoke", "listen"], function () {
-        this.setExport("invoke", async () => ({}));
+        this.setExport("invoke", invoke);
         this.setExport("listen", async (name, callback) => { listeners.set(name, callback); return () => {}; });
       }, { context });
     }
@@ -35,9 +45,11 @@ async function panel() {
   });
   await main.evaluate();
   return {
-    start() { main.namespace.regStart("test-flow", "register", "zai"); },
+    start(flow = "test-flow") { main.namespace.regStart(flow, "register", "zai"); },
     event(ev) { listeners.get("reg://event")({ payload: { flow: "test-flow", ...ev } }); },
     html() { return nodes.find(n => n.className === "drw")?.innerHTML || ""; },
+    button(act) { return nodes.find(n => n.className === "drw")?.buttons.find(b => b.dataset.act === act); },
+    toasts() { return nodes.filter(n => n.className === "toast err").map(n => n.innerHTML).join(""); },
   };
 }
 
@@ -66,4 +78,24 @@ test("宿主超时失败显示原因，不能被旧网页的 done 消息覆盖",
   p.event({ kind: "phase", phase: "done" });
   assert.match(p.html(), /reg-task-stage[^>]*>授权未完成/);
   assert.match(p.html(), /授权回调已过期/);
+});
+
+test("整理窗口进行中禁用重复操作，失败后提示并恢复按钮", async () => {
+  let reject, requests = 0;
+  const p = await panel({ invoke: command => {
+    assert.equal(command, "reg_tile_windows");
+    requests += 1;
+    return new Promise((_, fail) => { reject = fail; });
+  } });
+  p.start();
+  p.start("second-flow");
+  const button = p.button("tile");
+  const first = button.click();
+  await button.click();
+  assert.equal(requests, 1);
+  assert.match(p.html(), /data-act="tile" disabled/);
+  reject(new Error("模拟窗口定位失败"));
+  await first;
+  assert.match(p.toasts(), /模拟窗口定位失败/);
+  assert.doesNotMatch(p.html(), /data-act="tile" disabled/);
 });

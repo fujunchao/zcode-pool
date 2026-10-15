@@ -55,3 +55,60 @@ jobs:
       - name: 原生 WebView2 窗口布局回归（仅空白窗口）
         timeout-minutes: 5
         run: ./scripts/test-rust-windows.ps1 -LayoutSmoke
+
+  unix:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-22.04]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Linux 原生窗口测试依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xvfb openbox dbus-x11
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          cache-on-failure: true
+
+      - run: npm ci
+
+      - name: 前端构建
+        run: npm run build
+
+      - name: Rust 单元测试与原生布局测试编译
+        timeout-minutes: 20
+        run: |
+          cargo test --locked --manifest-path src-tauri/Cargo.toml
+          cargo build --locked --manifest-path src-tauri/Cargo.toml --example reg_layout_smoke
+
+      - name: macOS 原生窗口布局与焦点回归
+        if: runner.os == 'macOS'
+        timeout-minutes: 5
+        run: src-tauri/target/debug/examples/reg_layout_smoke
+
+      - name: Linux 原生窗口布局与焦点回归（X11）
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        env:
+          GDK_BACKEND: x11
+          WEBKIT_DISABLE_DMABUF_RENDERER: '1'
+        run: |
+          xvfb-run -a -s '-screen 0 1280x800x24' dbus-run-session -- sh -ec '
+            openbox &
+            sleep 1
+            exec src-tauri/target/debug/examples/reg_layout_smoke
+          '
