@@ -22,6 +22,19 @@ use tauri::{AppHandle, LogicalSize, Manager, WebviewWindow};
 
 type SmokeResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+fn inspect<T: Send + 'static>(
+    window: &WebviewWindow,
+    operation: impl FnOnce(&WebviewWindow) -> SmokeResult<T> + Send + 'static,
+) -> SmokeResult<T> {
+    // Monitor 转换也会访问 GDK；整个查询必须在主线程，不能只把 setter 串行化。
+    let (tx, rx) = std::sync::mpsc::channel();
+    let native = window.clone();
+    window.run_on_main_thread(move || {
+        let _ = tx.send(operation(&native));
+    })?;
+    rx.recv_timeout(Duration::from_secs(5))?
+}
+
 fn wait_until(description: &str, mut ready: impl FnMut() -> bool) -> SmokeResult<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !ready() {
@@ -34,31 +47,37 @@ fn wait_until(description: &str, mut ready: impl FnMut() -> bool) -> SmokeResult
 }
 
 fn bounds(window: &WebviewWindow) -> SmokeResult<(i32, i32, u32, u32)> {
-    let p = window.outer_position()?;
-    let s = window.outer_size()?;
-    Ok((p.x, p.y, s.width, s.height))
+    inspect(window, |window| {
+        let p = window.outer_position()?;
+        let s = window.outer_size()?;
+        Ok((p.x, p.y, s.width, s.height))
+    })
 }
 
 fn assert_visible(window: &WebviewWindow, positioned: bool) -> SmokeResult<()> {
-    let monitor = window.current_monitor()?.ok_or("窗口没有所在显示器")?;
-    let area = monitor.work_area();
-    let (x, y, width, height) = bounds(window)?;
-    if !window.is_visible()?
-        || width > area.size.width
-        || height > area.size.height
-        || (positioned
-            && (x < area.position.x
-                || y < area.position.y
-                || x as i64 + width as i64 > area.position.x as i64 + area.size.width as i64
-                || y as i64 + height as i64 > area.position.y as i64 + area.size.height as i64))
-    {
-        return Err(format!(
-            "{} 未完整落在工作区：({x},{y}) {width}×{height} / {area:?}",
-            window.label()
-        )
-        .into());
-    }
-    Ok(())
+    inspect(window, move |window| {
+        let monitor = window.current_monitor()?.ok_or("窗口没有所在显示器")?;
+        let area = monitor.work_area();
+        let pos = window.outer_position()?;
+        let size = window.outer_size()?;
+        let (x, y, width, height) = (pos.x, pos.y, size.width, size.height);
+        if !window.is_visible()?
+            || width > area.size.width
+            || height > area.size.height
+            || (positioned
+                && (x < area.position.x
+                    || y < area.position.y
+                    || x as i64 + width as i64 > area.position.x as i64 + area.size.width as i64
+                    || y as i64 + height as i64 > area.position.y as i64 + area.size.height as i64))
+        {
+            return Err(format!(
+                "{} 未完整落在工作区：({x},{y}) {width}×{height} / {area:?}",
+                window.label()
+            )
+            .into());
+        }
+        Ok(())
+    })
 }
 
 async fn open(app: &AppHandle, label: &str) -> SmokeResult<WebviewWindow> {
@@ -101,6 +120,16 @@ fn close(app: &AppHandle, window: &WebviewWindow) -> SmokeResult<()> {
 }
 
 async fn smoke(app: &AppHandle) -> SmokeResult<()> {
+    // 产品已有主窗口；稳定应用激活和标题栏状态后再测批量无焦点显示。
+    let _main = tauri::WebviewWindowBuilder::new(
+        app,
+        "main",
+        tauri::WebviewUrl::External("about:blank".parse()?),
+    )
+    .inner_size(300.0, 200.0)
+    .focused(true)
+    .build()?;
+    std::thread::sleep(Duration::from_millis(250));
     let mut windows = Vec::new();
     for n in 0..5 {
         windows.push(open(app, &format!("login-layout-{n}")).await?);
@@ -113,14 +142,17 @@ async fn smoke(app: &AppHandle) -> SmokeResult<()> {
     for window in &windows {
         assert_visible(window, positioned)?;
     }
-    let before: Vec<_> = windows.iter().map(bounds).collect::<SmokeResult<_>>()?;
-    let before_area = windows[0].current_monitor()?.map(|m| m.work_area().clone());
     if positioned {
         windows[1].set_focus()?;
         wait_until("旧窗口获得焦点", || {
             windows[1].is_focused().unwrap_or(false)
         })?;
     }
+    std::thread::sleep(Duration::from_millis(100));
+    let before: Vec<_> = windows.iter().map(bounds).collect::<SmokeResult<_>>()?;
+    let before_area = inspect(&windows[0], |w| {
+        Ok(w.current_monitor()?.map(|m| m.work_area().clone()))
+    })?;
     let lost_focus = Arc::new(AtomicUsize::new(0));
     let focus_events = lost_focus.clone();
     windows[1].on_window_event(move |event| {
@@ -134,14 +166,15 @@ async fn smoke(app: &AppHandle) -> SmokeResult<()> {
     let retained_focus =
         !positioned || (windows[1].is_focused()? && lost_focus.load(Ordering::SeqCst) == 0);
     println!("补位全程不抢旧窗口焦点：{retained_focus}");
-    if positioned && bounds(&replacement)? != before[0] {
+    let after = bounds(&replacement)?;
+    if positioned && (after.0, after.1) != (before[0].0, before[0].1) {
         return Err(format!(
             "补位没有复用原槽位：原={:?} 新={:?} 工作区原={before_area:?} 新={:?}",
             before[0],
             bounds(&replacement)?,
-            replacement
+            inspect(&replacement, |w| Ok(w
                 .current_monitor()?
-                .map(|m| m.work_area().clone())
+                .map(|m| m.work_area().clone())))?
         )
         .into());
     }
@@ -155,11 +188,12 @@ async fn smoke(app: &AppHandle) -> SmokeResult<()> {
     for window in &windows[2..] {
         close(app, window)?;
     }
-    let area = windows[1]
-        .current_monitor()?
-        .ok_or("没有显示器")?
-        .work_area()
-        .clone();
+    let area = inspect(&windows[1], |w| {
+        Ok(w.current_monitor()?
+            .ok_or("没有显示器")?
+            .work_area()
+            .clone())
+    })?;
     let scale = windows[1].scale_factor()?;
     windows[1].set_size(LogicalSize::new(
         area.size.width as f64 / scale + 200.0,

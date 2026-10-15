@@ -221,8 +221,8 @@ async fn wait_geometry(
         if Instant::now() >= deadline {
             let detail = with_window(app, label, move |window| {
                 Ok(format!(
-                    "native window geometry did not settle: expected size={size:?} position={position:?}; actual inner={:?} outer={:?} position={:?} scale={:?}",
-                    window.inner_size(), window.outer_size(), window.outer_position(), window.scale_factor(),
+                    "native window geometry did not settle: expected size={size:?} position={position:?}; measured inner={:?}; actual inner={:?} outer={:?} position={:?} scale={:?}",
+                    inner_size(window), window.inner_size(), window.outer_size(), window.outer_position(), window.scale_factor(),
                 ))
             }).await?;
             return Err(layout_error(detail));
