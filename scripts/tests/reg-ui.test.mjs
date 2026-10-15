@@ -53,7 +53,14 @@ async function panel({ invoke = async () => ({}) } = {}) {
       const batch = module(new URL("../../src/mbox.js", import.meta.url).href);
       await batch.link(link);
       await batch.evaluate();
-      main.namespace.setRegTerminated(batch.namespace.mboxOnTerminated);
+      // 执行 main.js 的真实接线，避免夹具自行正确透传、生产代码却丢参数。
+      const mainSource = fs.readFileSync(new URL("../../src/main.js", import.meta.url), "utf8");
+      const wiring = mainSource.match(/^setRegTerminated\(.*\);$/m)?.[0];
+      assert.ok(wiring, "需要更新主界面收口接线的提取边界");
+      vm.runInNewContext(wiring, {
+        setRegTerminated: main.namespace.setRegTerminated,
+        mboxOnTerminated: batch.namespace.mboxOnTerminated,
+      });
       return batch.namespace;
     },
     event(ev) { listeners.get("reg://event")({ payload: { flow: "test-flow", ...ev } }); },
@@ -148,8 +155,8 @@ test("关闭面板会清除尚未绑定的旧流程事件", async () => {
   assert.doesNotMatch(p.html(), /reg-task-stage[^>]*>入库完成/);
 });
 
-for (const completed of [false, true]) {
-  test(`真实批次模块接住开窗响应前的${completed ? "完成结果" : "单次填表请求"}`, async () => {
+for (const completed of [null, true, false]) {
+  test(`真实批次模块接住开窗响应前的${completed === null ? "单次填表请求" : completed ? "成功结果" : "失败结果"}`, async () => {
     const calls = [];
     let finishOpen;
     const email = "fixture@example.invalid";
@@ -165,12 +172,12 @@ for (const completed of [false, true]) {
     batch.setMboxConc(1);
     await batch.mboxVerify();
     p.event({ kind: "ask", ask: "signup" });
-    if (completed) p.event({ kind: "result", ok: true });
+    if (completed !== null) p.event({ kind: "result", ok: completed, error: completed ? "" : "模拟授权失败" });
     finishOpen({ flow: "test-flow" });
     for (let i = 0; i < 30; i++) await Promise.resolve();
-    if (completed) {
+    if (completed !== null) {
       assert.equal(batch.mboxRunning(), false);
-      assert.equal(calls.filter(c => c.command === "pool_mark_verified" && c.args.ok).length, 1);
+      assert.equal(calls.filter(c => c.command === "pool_mark_verified" && c.args.ok === completed).length, 1);
       assert.equal(calls.filter(c => c.command === "reg_input").length, 0);
     } else {
       const inputs = calls.filter(c => c.command === "reg_input");

@@ -492,7 +492,8 @@ export function mboxOnTerminated(flow, reason, result) {
   const b = M.batch;
   if (!b.running || !b.active.has(flow)) return;
   if (reason === "result") {
-    mboxOnFlowDone(flow, result?.ok !== false, result?.error || "");
+    if (typeof result?.ok !== "boolean") return;
+    mboxOnFlowDone(flow, result.ok, result.error || "");
     return;
   }
   if (reason === "skipped") {

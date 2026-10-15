@@ -1607,7 +1607,7 @@ window.onRenameKey = (e, id) => {
 };
 installDelegation();
 setMboxRerender(() => { if (!uiLocked()) render(); });
-setRegTerminated((flow, reason) => mboxOnTerminated(flow, reason));
+setRegTerminated(mboxOnTerminated);
 
 document.addEventListener("change", (e) => {
   const el = e.target;
