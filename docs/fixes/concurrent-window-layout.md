@@ -102,7 +102,7 @@
 早期请求丢失、Wayland 全局坐标限制、macOS 目标屏缩放、失败终态误判共四项审查发现
 均已修正；真实接线的成功/失败回放与当时原生回归已通过。后续重复验证发现见下一节。
 
-## v0.2.14 补丁追踪
+## v0.2.14 补丁与发行记录
 
 - 发布后的文档提交只改 Markdown，但重复回归
   [Check 38772702159](https://github.com/fujunchao/zcode-pool/actions/runs/38772702159)
@@ -118,4 +118,13 @@
   不再混用更新时序不同的数据源；Wayland 同样连续执行八轮回归。
 - GTK 最小尺寸和可聚焦提示也可能在后续帧改变装饰分配，因此确认发生在最后一项设置
   之后，并要求实际几何连续稳定 120 毫秒；不再只检查某一瞬间是否恰好匹配。
-- 最终 Check、Release 与公开状态待确认后补充。
+- Node 20 的实验性 VM 测试子进程两次以 `0xC0000005` 退出，没有产生 JavaScript 断言；
+  CI 与构建统一到本机已验证的 Node 22，完整测试恢复通过，没有跳过测试或忽略失败。
+- v0.2.14 标签源代码：`6971c88956e30f5417214cb7509cbbcc8271a90f`。
+- 最终功能校验：[Check 38780077200](https://github.com/fujunchao/zcode-pool/actions/runs/38780077200)，
+  三个平台全绿；28 项 JavaScript、各平台 41 项 Rust 单元测试通过，Windows/macOS 原生验证通过，
+  X11 与 Wayland 各连续八轮原生回归通过。
+- 构建与附件上传：[Release 38781281910](https://github.com/fujunchao/zcode-pool/actions/runs/38781281910)。
+- 发布与下载入口：[Z·POOL v0.2.14](https://github.com/fujunchao/zcode-pool/releases/tag/v0.2.14)。
+  沿用 Windows 安装版/便携版、macOS Universal DMG、Linux DEB/AppImage 五件附件；
+  公开发布以构建全绿、附件清单核对和最后一轮主分支复核全绿为门槛，不覆盖 v0.2.13。
