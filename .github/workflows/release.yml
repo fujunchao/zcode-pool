@@ -13,7 +13,7 @@ jobs:
       contents: write
     env:
       # 手动派发（非 tag）时兜底用的发布标签 —— **发版时只改这一处**：tagName 与便携版附件上传都读它
-      RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.2.13' }}
+      RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.2.14' }}
     strategy:
       fail-fast: false
       matrix:
@@ -58,6 +58,9 @@ jobs:
           releaseBody: |
             本版改进
 
+            - **v0.2.14 补丁：修复 Linux X11 偶发抢焦点**。新窗口显示前明确关闭 GTK
+              映射时自动激活；人工点击“打开登录窗口”仍可正常获取焦点。增加连续八轮
+              X11 原生布局/焦点回归，保留 Wayland 验证。本版同时包含 v0.2.13 的全部优化：
             - **并发名额不再超额**：启动等待与初始化均预占名额，多个任务同时完成时
               不会重复补位；停止批次后，迟到的旧窗口只清理自身，不影响新批次。
             - **窗口始终优先留在工作区内**：根据实际工作区和显示缩放平铺，放不下时
