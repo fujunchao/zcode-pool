@@ -37,7 +37,7 @@ async function panel() {
   return {
     start() { main.namespace.regStart("test-flow", "register", "zai"); },
     event(ev) { listeners.get("reg://event")({ payload: { flow: "test-flow", ...ev } }); },
-    html() { return nodes.find(n => n.className === "reg-drawer")?.innerHTML || ""; },
+    html() { return nodes.find(n => n.className === "drw")?.innerHTML || ""; },
   };
 }
 

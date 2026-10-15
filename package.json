@@ -10,7 +10,7 @@
     "tauri": "tauri",
     "icons": "tauri icon assets/app-icon.svg",
     "dist": "node scripts/dist.mjs",
-    "test:reg": "node --experimental-vm-modules --test scripts/tests/*.test.mjs",
+    "test:reg": "node --experimental-vm-modules --test scripts/tests/reg-driver.test.mjs scripts/tests/reg-ui.test.mjs",
     "check:i18n": "node scripts/check-i18n-keys.mjs"
   },
   "dependencies": {
