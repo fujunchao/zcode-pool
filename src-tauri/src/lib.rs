@@ -797,6 +797,7 @@ async fn oauth_begin(
         "auto": auto,
     }));
     let flow_driver = flow.clone();
+    let flow_load = flow.clone();
     let mut builder = tauri::WebviewWindowBuilder::new(
         &app,
         login_label(&flow),
@@ -816,14 +817,20 @@ async fn oauth_begin(
         builder = builder.proxy_url(u);
     }
     builder
+    .on_page_load(move |_, payload| {
+        let event = match payload.event() {
+            tauri::webview::PageLoadEvent::Started => "load-start",
+            tauri::webview::PageLoadEvent::Finished => "load-finished",
+        };
+        flowlog::log(&flow_load, event, &driver::url_for_log(payload.url()));
+    })
     .on_navigation(move |url| {
         if url.scheme() == "zpool-driver" {
             // 不再接受导航式消息，也不把旧协议交给操作系统打开。
             return false;
         }
         if url.scheme() == "http" || url.scheme() == "https" {
-            let full = url.to_string();
-            let short: String = full.chars().take(170).collect();
+            let short: String = driver::url_for_log(url).chars().take(170).collect();
             flowlog::log(&flow_driver, "nav", &short);
         }
         if url.scheme() != "zcode" {
@@ -847,6 +854,8 @@ async fn oauth_begin(
     // 且不移动任何已有窗口（正过验证码的窗口不会被打断）。
     place_login_window(&app, &flow, reg_capacity);
     if let Some(w) = find_login_window(&app, &flow) {
+        #[cfg(windows)]
+        driver::observe_navigation(&w, &flow);
         let app_close = app.clone();
         let flow_evt2 = flow.clone();
         let slot_key = login_label(&flow);
@@ -1651,6 +1660,8 @@ fn finalize_oauth_result(app: &AppHandle, flow: &str, result: Result<serde_json:
 fn spawn_poll_loop(app: AppHandle, provider: String, flow: String, mid: String, cfg: PollCfg) {
     std::thread::spawn(move || {
         let ours = || flow_still_ours(&flow);
+        let mut retry_errors = 0u32;
+        let mut last_retry_log: Option<std::time::Instant> = None;
         let deadline = {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1664,7 +1675,21 @@ fn spawn_poll_loop(app: AppHandle, provider: String, flow: String, mid: String, 
                 return;
             }
             match oauth::poll_flow_once(&cfg.url, &cfg.token, &mid) {
-                Ok(oauth::PollOutcome::Pending) => {}
+                Ok(oauth::PollOutcome::Pending) => {
+                    if retry_errors > 0 {
+                        flowlog::log(&flow, "poll-recovered", &format!("retry_errors={retry_errors}"));
+                        retry_errors = 0;
+                        last_retry_log = None;
+                    }
+                }
+                Ok(oauth::PollOutcome::Retry(reason)) => {
+                    retry_errors = retry_errors.saturating_add(1);
+                    // 每个流程最多每 30 秒记录一次，避免断网时刷屏；不改变重试和总超时策略。
+                    if last_retry_log.map_or(true, |t| t.elapsed() >= std::time::Duration::from_secs(30)) {
+                        flowlog::log(&flow, "poll-retry", &format!("retry_errors={retry_errors} {reason}"));
+                        last_retry_log = Some(std::time::Instant::now());
+                    }
+                }
                 Ok(oauth::PollOutcome::Ready(data)) => {
                     flowlog::log(&flow, "poll-ready", "");
                     let raw = json!({ "code": 0, "data": data });
@@ -1701,7 +1726,7 @@ fn spawn_poll_loop(app: AppHandle, provider: String, flow: String, mid: String, 
                 if !ours() {
                     return;
                 }
-                flowlog::log(&flow, "poll-timeout", "");
+                flowlog::log(&flow, "poll-timeout", &format!("retry_errors={retry_errors}"));
                 finalize_oauth_result(&app, &flow, Err(i18n::tr("err.oauth.expired")));
                 return;
             }

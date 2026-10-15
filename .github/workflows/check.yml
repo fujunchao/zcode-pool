@@ -40,7 +40,13 @@ jobs:
         run: npm run test:reg
 
       - name: 前端构建
+        if: ${{ !cancelled() }}
         run: npm run build
 
       - name: cargo test（Rust 单元测试）
+        if: ${{ !cancelled() }}
         run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: 原生 WebView2 授权回调冒烟测试（仅本地测试页）
+        timeout-minutes: 5
+        run: cargo run --manifest-path src-tauri/Cargo.toml --example reg_driver_smoke

@@ -81,6 +81,54 @@ pub fn closed_event() -> Value {
     json!({ "kind": "closed" })
 }
 
+/// 导航日志只保留站点和路径；授权码、邮箱验证 token 及片段不落盘。
+pub fn url_for_log(url: &tauri::Url) -> String {
+    let mut clean = url.clone();
+    clean.set_query(None);
+    clean.set_fragment(None);
+    let _ = clean.set_username("");
+    let _ = clean.set_password(None);
+    clean.to_string()
+}
+
+/// Tauri 的 Finished 不区分导航成功/失败，Windows 额外记录 WebView2 的真实错误码。
+#[cfg(windows)]
+pub fn observe_navigation(window: &tauri::WebviewWindow, flow: &str) {
+    use webview2_com::NavigationCompletedEventHandler;
+    let flow = flow.to_string();
+    let setup_flow = flow.clone();
+    let result = window.with_webview(move |view| unsafe {
+        let webview = match view.controller().CoreWebView2() {
+            Ok(v) => v,
+            Err(e) => {
+                crate::flowlog::log(&flow, "nav-observer-fail", &e.to_string());
+                return;
+            }
+        };
+        let event_flow = flow.clone();
+        let handler = NavigationCompletedEventHandler::create(Box::new(move |_, args| {
+            let Some(args) = args else { return Ok(()) };
+            let mut success = Default::default();
+            let mut id = 0;
+            args.IsSuccess(&mut success)?;
+            args.NavigationId(&mut id)?;
+            if !success.as_bool() {
+                let mut status = Default::default();
+                args.WebErrorStatus(&mut status)?;
+                crate::flowlog::log(&event_flow, "nav-failed", &format!("navigation_id={id} web_error_status={}", status.0));
+            }
+            Ok(())
+        }));
+        let mut token = 0;
+        if let Err(e) = webview.add_NavigationCompleted(&handler, &mut token) {
+            crate::flowlog::log(&flow, "nav-observer-fail", &e.to_string());
+        }
+    });
+    if let Err(e) = result {
+        crate::flowlog::log(&setup_flow, "nav-observer-fail", &e.to_string());
+    }
+}
+
 pub fn summarize(msg: &Value) -> String {
     let get = |k: &str| msg.get(k).and_then(|v| v.as_str()).unwrap_or("");
     let mut out = String::new();
@@ -92,8 +140,15 @@ pub fn summarize(msg: &Value) -> String {
     }
     for k in ["a", "b", "url"] {
         let v = get(k);
+        if k == "b" && get("code") == "loginClicked" {
+            continue;
+        }
         if !v.is_empty() {
-            let t: String = v.chars().take(140).collect();
+            let clean = tauri::Url::parse(v).ok()
+                .filter(|u| matches!(u.scheme(), "http" | "https"))
+                .map(|u| url_for_log(&u))
+                .unwrap_or_else(|| v.to_string());
+            let t: String = clean.chars().take(140).collect();
             out.push_str(&format!("{k}={t} "));
         }
     }

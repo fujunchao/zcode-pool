@@ -182,6 +182,8 @@ fn init_flow_at(url: &str, provider: &str, mid: &str) -> Result<FlowInit, String
 #[derive(Debug)]
 pub enum PollOutcome {
     Pending,
+    /// 可重试的网络故障，与服务端明确返回的 pending 区分，避免超时前完全无诊断信息。
+    Retry(String),
     Ready(Value),
 }
 
@@ -201,11 +203,12 @@ pub fn poll_flow_once(url: &str, poll_token: &str, mid: &str) -> Result<PollOutc
             }
             return Err(crate::i18n::trf("err.oauth.poll_terminal", &[("code", &code.to_string())]));
         }
-        Err(_) => return Ok(PollOutcome::Pending),
+        Err(ureq::Error::Status(code, _)) => return Ok(PollOutcome::Retry(format!("HTTP {code}"))),
+        Err(ureq::Error::Transport(e)) => return Ok(PollOutcome::Retry(format!("网络错误：{:?}", e.kind()))),
     };
     let body = match resp.into_string() {
         Ok(b) => b,
-        Err(_) => return Ok(PollOutcome::Pending),
+        Err(_) => return Ok(PollOutcome::Retry("读取轮询响应失败".into())),
     };
     let v: Value = serde_json::from_str(&body).unwrap_or(Value::String(body));
     let invalid = || crate::i18n::tr("err.oauth.poll_invalid");

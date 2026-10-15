@@ -10,7 +10,7 @@ async function panel() {
     body: { classList, appendChild() {} }, documentElement: {},
     addEventListener() {}, querySelector() { return null; },
     createElement() {
-      const el = { innerHTML: "", classList, addEventListener() {}, querySelectorAll() { return []; }, remove() {} };
+      const el = { innerHTML: "", classList, addEventListener() {}, querySelector() { return null; }, querySelectorAll() { return []; }, remove() {} };
       nodes.push(el);
       return el;
     },
