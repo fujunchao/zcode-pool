@@ -28,6 +28,10 @@ pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 ureq = { version = "2", features = ["json"] }
 tiny_http = "0.12"
 sys-locale = "0.3"
+tokio = { version = "1", features = ["time"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38.2"
