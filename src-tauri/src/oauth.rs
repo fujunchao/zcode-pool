@@ -2,6 +2,38 @@ use crate::quota;
 use serde_json::{json, Value};
 use std::time::Duration;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn poll_reply(status: u16, body: Value) -> Result<PollOutcome, String> {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/poll/fixture", server.server_addr().to_ip().unwrap());
+        let worker = std::thread::spawn(move || {
+            let request = server.recv_timeout(Duration::from_secs(20)).unwrap().expect("应收到一次轮询请求");
+            request.respond(tiny_http::Response::from_string(body.to_string()).with_status_code(status)).unwrap();
+        });
+        let result = poll_flow_once(&url, "fixture-poll-token", "fixture-mid");
+        worker.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn transient_poll_errors_are_not_reported_as_server_pending() {
+        let r = poll_reply(503, json!({"message":"temporary"}));
+        assert!(!matches!(r, Ok(PollOutcome::Pending)), "网络/HTTP 故障不能伪装成服务端正常等待");
+    }
+
+    #[test]
+    fn poll_wait_ready_and_expired_keep_their_meaning() {
+        assert!(matches!(poll_reply(200, json!({"code":0,"data":{"status":"pending"}})), Ok(PollOutcome::Pending)));
+        let r = poll_reply(200, json!({"code":0,"data":{"status":"ready","token":"fixture","zai":{"access_token":"fixture"},"user":{"user_id":"fixture"}}}));
+        assert!(matches!(r, Ok(PollOutcome::Ready(_))));
+        assert!(poll_reply(400, json!({"code":3004})).is_err());
+        assert!(poll_reply(200, json!({"code":0,"data":{"status":"failed"}})).is_err());
+    }
+}
+
 const TOKEN_URL: &str = "https://zcode.z.ai/api/v1/oauth/token";
 const FLOW_INIT_URL: &str = "https://zcode.z.ai/api/v1/oauth/cli/init";
 pub const FLOW_TIMEOUT_MS: u64 = 300_000;

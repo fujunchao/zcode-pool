@@ -1,0 +1,15 @@
+{
+  "identifier": "login-driver",
+  "description": "登录网页仅能上报注册进度，不能读取账号、修改文件或调用其他应用命令",
+  "local": false,
+  "windows": ["login-*"],
+  "remote": {
+    "urls": [
+      "https://chat.z.ai/*",
+      "https://zcode.z.ai/*",
+      "https://bigmodel.cn/*",
+      "https://*.bigmodel.cn/*"
+    ]
+  },
+  "permissions": ["reg-driver:allow-report"]
+}

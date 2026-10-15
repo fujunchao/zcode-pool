@@ -7,9 +7,9 @@ import { esc, toast } from "./ui.js";
 const STEPS = {
   register: [
     "open-signup", "signup-form", "await-email", "open-link",
-    "complete-signup", "back-to-authorize", "confirm-authorize", "done",
+    "complete-signup", "back-to-authorize", "confirm-authorize", "await-callback", "done",
   ],
-  login: ["confirm-authorize", "done"],
+  login: ["confirm-authorize", "await-callback", "done"],
   observe: [],
 };
 
@@ -85,6 +85,7 @@ export function regStart(flow, mode, provider) {
     logs: [],
     closed: false,
     failed: false,
+    finished: false,
     startedAt: Date.now(),
     signupEmail: "",
     batchEmail: "",
@@ -125,7 +126,16 @@ export function regEvent(ev) {
   if (!ev || typeof ev !== "object") return;
   const s = sessions.get(ev.flow);
   if (!s) return;
+  // 宿主已收口后，旧页面的在途状态消息不能把成功/失败改回“运行中”。
+  if (s.finished && ev.kind !== "log") return;
   switch (ev.kind) {
+    case "result":
+      s.finished = true;
+      s.closed = false;
+      s.failed = ev.ok === false;
+      s.phase = s.failed ? "failed" : "done";
+      s.note = s.failed ? String(ev.error || "") : "";
+      break;
     case "ready":
       pushLog(s, "info", "connected", ev.provider || s.provider);
       break;

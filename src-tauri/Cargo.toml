@@ -40,6 +40,9 @@ windows-sys = { version = "0.52", features = [
 [target.'cfg(not(windows))'.dependencies]
 iana-time-zone = "0.1"
 
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
+
 [profile.release]
 strip = "symbols"
 lto = "thin"

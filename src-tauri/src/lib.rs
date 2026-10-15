@@ -797,7 +797,6 @@ async fn oauth_begin(
         "auto": auto,
     }));
     let flow_driver = flow.clone();
-    let flow_evt = flow.clone();
     let mut builder = tauri::WebviewWindowBuilder::new(
         &app,
         login_label(&flow),
@@ -818,15 +817,8 @@ async fn oauth_begin(
     }
     builder
     .on_navigation(move |url| {
-        if url.scheme() == driver::SENTINEL_SCHEME {
-            match driver::parse_message(&url.to_string()) {
-                Some(mut msg) => {
-                    msg["flow"] = json!(flow_evt.as_str());
-                    flowlog::log(&flow_driver, "drv", &driver::summarize(&msg));
-                    let _ = app2.emit("reg://event", msg);
-                }
-                None => flowlog::log(&flow_driver, "driver-bad-msg", ""),
-            }
+        if url.scheme() == "zpool-driver" {
+            // 不再接受导航式消息，也不把旧协议交给操作系统打开。
             return false;
         }
         if url.scheme() == "http" || url.scheme() == "https" {
@@ -1633,6 +1625,11 @@ fn finalize_oauth_result(app: &AppHandle, flow: &str, result: Result<serde_json:
         .filter(|e| !e.trim().is_empty())
         .or_else(|| pending_email(flow));
     pending_remove(flow);
+    // 网页上的“授权成功”不代表账号已入库；只有宿主的最终结果能结束进度卡片。
+    let _ = app.emit("reg://event", &json!({
+        "kind": "result", "flow": flow, "ok": result.is_ok(),
+        "error": result.as_ref().err(),
+    }));
     if let Some(w) = find_login_window(app, flow) {
         let _ = w.close();
     }
@@ -2147,6 +2144,7 @@ async fn relay_external(on: bool) -> Result<Value, String> {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(driver::plugin())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main(app);
         }))

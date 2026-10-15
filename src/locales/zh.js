@@ -362,6 +362,8 @@ export const zh = {
   "reg.step.back-to-authorize": "回到授权页",
   "reg.step.confirm-authorize": "确认授权",
   "reg.step.done": "入库完成",
+  "reg.step.await-callback": "等待授权回调",
+  "reg.step.failed": "授权未完成",
 
   "reg.page.signup": "Z.ai 注册表单",
   "reg.page.zaiAuth": "Z.ai 登录页",
@@ -377,6 +379,7 @@ export const zh = {
   "reg.note.openLink": "正在本窗口打开激活链接（会话保持，不用重新登录）…",
   "reg.note.needPassword": "这一步要设置密码。请在登录窗口里手动填两次密码后点「完成注册」。",
   "reg.note.backToAuthorize": "注册完成，正在回到授权页完成登录…",
+  "reg.note.awaitCallback": "网页已提交授权，正在等待后台取得登录凭据并保存账号；此时尚未入库，请勿重复注册。",
   "reg.note.assistPhone": "请填手机号 → 点「获取验证码」→ 过拼图 → 填验证码；填好后助手会自动点「登录 / 注册」。",
   "reg.note.bigmodelNoEmail": "BigModel 没有邮箱注册入口，请在窗口里用手机号 + 短信验证码登录；想邮箱注册请改用 z.ai。",
   "reg.note.openSignup": "正在切到 Z.ai 注册表单…",

@@ -3,7 +3,7 @@ name: Check
 on:
   workflow_dispatch:
   push:
-    branches: ['main', 'feat/**']
+    branches: ['main', 'feat/**', 'codex/**']
 
 permissions:
   contents: read
@@ -35,6 +35,9 @@ jobs:
 
       - name: i18n 词条检查
         run: npm run check:i18n
+
+      - name: 注册回调回归测试
+        run: npm run test:reg
 
       - name: 前端构建
         run: npm run build

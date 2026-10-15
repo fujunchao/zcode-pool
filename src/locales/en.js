@@ -362,6 +362,8 @@ export const en = {
   "reg.step.back-to-authorize": "Back to authorize page",
   "reg.step.confirm-authorize": "Confirm authorization",
   "reg.step.done": "Account saved",
+  "reg.step.await-callback": "Waiting for authorization callback",
+  "reg.step.failed": "Authorization incomplete",
 
   "reg.page.signup": "Z.ai signup form",
   "reg.page.zaiAuth": "Z.ai sign-in page",
@@ -377,6 +379,7 @@ export const en = {
   "reg.note.openLink": "Opening the activation link in this window (session preserved, no re-login)…",
   "reg.note.needPassword": "This step sets your password. Fill in the password twice in the login window and click “Finish” there.",
   "reg.note.backToAuthorize": "Signup done — returning to the authorize page to finish signing in…",
+  "reg.note.awaitCallback": "Authorization was submitted. Waiting for the backend to receive credentials and save the account; please do not register again.",
   "reg.note.assistPhone": "Enter your phone → click “Get code” → solve the puzzle → enter the SMS code. The assistant submits automatically once both are filled in.",
   "reg.note.bigmodelNoEmail": "BigModel has no email signup entry. Sign in there with phone + SMS code, or pick z.ai if you want email registration.",
   "reg.note.openSignup": "Switching to the Z.ai signup form…",

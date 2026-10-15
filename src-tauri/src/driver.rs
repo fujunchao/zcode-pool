@@ -1,9 +1,7 @@
 use serde_json::{json, Map, Value};
+use tauri::{AppHandle, Emitter, Runtime, Webview};
 
 pub const DRIVER_JS: &str = include_str!("driver/zpool-driver.js");
-
-pub const SENTINEL_SCHEME: &str = "zpool-driver";
-const SENTINEL_PREFIX: &str = "zpool-driver://msg";
 
 pub const MODES: &[&str] = &["observe", "login", "register"];
 
@@ -33,34 +31,48 @@ pub fn bootstrap_script(cfg: &Value) -> String {
     format!("window.__ZPOOL_CFG = {json};\n{DRIVER_JS}\n")
 }
 
-pub fn parse_message(url: &str) -> Option<Value> {
-    let rest = url.strip_prefix(SENTINEL_PREFIX)?;
-    let qs = rest.trim_start_matches('?');
+/// 独立插件只提供消息上报，不给远程登录网页开放账号管理命令。
+pub fn plugin<R: Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    tauri::plugin::Builder::new("reg-driver")
+        .invoke_handler(tauri::generate_handler![report])
+        .build()
+}
+
+#[tauri::command]
+fn report<R: Runtime>(app: AppHandle<R>, webview: Webview<R>, message: Value) -> Result<(), String> {
+    if !webview.label().starts_with("login-") {
+        return Err("注册消息只能由登录窗口上报".into());
+    }
+    // 流程由宿主窗口身份决定，网页不能伪造 flow 来影响其他并发窗口。
+    let flow = crate::pending_oauth_guard()
+        .values()
+        .find(|p| crate::login_label(&p.flow) == webview.label())
+        .map(|p| p.flow.clone());
+    let Some(flow) = flow else {
+        // 正常关闭时可能还有旧文档的在途消息，直接忽略，不复活已完成的流程。
+        return Ok(());
+    };
+    let mut msg = parse_message(&message).ok_or("非法的注册驱动消息")?;
+    msg["flow"] = json!(flow);
+    crate::flowlog::log(&flow, "drv", &summarize(&msg));
+    app.emit("reg://event", msg).map_err(|e| e.to_string())
+}
+
+pub fn parse_message(message: &Value) -> Option<Value> {
+    let input = message.as_object()?;
     let mut map = Map::new();
-    for kv in qs.split('&') {
-        if kv.is_empty() {
-            continue;
+    for key in STRING_FIELDS {
+        if let Some(s) = input.get(*key).and_then(Value::as_str) {
+            map.insert((*key).into(), Value::String(s.chars().take(1000).collect()));
         }
-        let (k, v) = match kv.split_once('=') {
-            Some(p) => p,
-            None => continue,
-        };
-        let key = urldecode(k);
-        if !STRING_FIELDS.contains(&key.as_str()) {
-            continue;
-        }
-        map.insert(key, Value::String(urldecode(v)));
     }
     let kind = map.get("kind").and_then(|v| v.as_str()).unwrap_or("");
     if !KINDS.contains(&kind) {
         return None;
     }
-    for key in ["a", "b", "url"] {
-        if let Some(Value::String(s)) = map.get(key) {
-            if s.chars().count() > 1000 {
-                map.insert(key.to_string(), Value::String(s.chars().take(1000).collect()));
-            }
-        }
+    if kind == "phase" && map.get("phase").and_then(Value::as_str) == Some("done") {
+        // 账号是否入库只能由后台决定，网页的“授权成功”不具备这个含义。
+        return None;
     }
     Some(Value::Object(map))
 }
@@ -88,49 +100,13 @@ pub fn summarize(msg: &Value) -> String {
     out.trim_end().to_string()
 }
 
-fn urldecode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let hex = |c: u8| -> Option<u8> {
-        match c {
-            b'0'..=b'9' => Some(c - b'0'),
-            b'a'..=b'f' => Some(c - b'a' + 10),
-            b'A'..=b'F' => Some(c - b'A' + 10),
-            _ => None,
-        }
-    };
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                if let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
-                    out.push(h << 4 | l);
-                    i += 3;
-                } else {
-                    out.push(b'%');
-                    i += 1;
-                }
-            }
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn parses_log_message() {
-        let v = parse_message("zpool-driver://msg?kind=log&level=ok&code=clickedCreate&a=me%40z.ai")
+        let v = parse_message(&json!({"kind":"log","level":"ok","code":"clickedCreate","a":"me@z.ai"}))
             .unwrap();
         assert_eq!(v["kind"], "log");
         assert_eq!(v["level"], "ok");
@@ -140,30 +116,31 @@ mod tests {
 
     #[test]
     fn parses_note_and_phase() {
-        let v = parse_message("zpool-driver://msg?kind=note&code=settle").unwrap();
+        let v = parse_message(&json!({"kind":"note","code":"settle"})).unwrap();
         assert_eq!(v["code"], "settle");
-        let v = parse_message("zpool-driver://msg?kind=phase&phase=signup-form").unwrap();
+        let v = parse_message(&json!({"kind":"phase","phase":"signup-form"})).unwrap();
         assert_eq!(v["phase"], "signup-form");
     }
 
     #[test]
-    fn rejects_unknown_kind_and_foreign_scheme() {
-        assert!(parse_message("zpool-driver://msg?kind=evil").is_none());
-        assert!(parse_message("https://example.com/?kind=log").is_none());
-        assert!(parse_message("zcode://oauth/callback?kind=log").is_none());
+    fn rejects_unknown_kind_and_non_object() {
+        assert!(parse_message(&json!({"kind":"evil"})).is_none());
+        assert!(parse_message(&json!("https://example.com/?kind=log")).is_none());
+        assert!(parse_message(&Value::Null).is_none());
     }
 
     #[test]
     fn drops_non_whitelisted_fields() {
-        let v = parse_message("zpool-driver://msg?kind=log&code=page&token=secret").unwrap();
+        let v = parse_message(&json!({"kind":"log","code":"page","token":"secret","flow":"other-flow"})).unwrap();
         assert!(v.get("token").is_none());
+        assert!(v.get("flow").is_none());
         assert_eq!(v["code"], "page");
     }
 
     #[test]
     fn truncates_oversized_field() {
         let big = "x".repeat(5000);
-        let v = parse_message(&format!("zpool-driver://msg?kind=log&code=page&a={big}")).unwrap();
+        let v = parse_message(&json!({"kind":"log","code":"page","a":big})).unwrap();
         assert_eq!(v["a"].as_str().unwrap().chars().count(), 1000);
     }
 
@@ -177,8 +154,15 @@ mod tests {
     }
 
     #[test]
+    fn page_cannot_report_account_completion() {
+        assert!(parse_message(&json!({"kind":"phase","phase":"done"})).is_none());
+        assert!(parse_message(&json!({"kind":"result","ok":true})).is_none());
+        assert!(parse_message(&json!({"kind":"phase","phase":"await-callback"})).is_some());
+    }
+
+    #[test]
     fn summarize_is_one_compact_line() {
-        let v = parse_message("zpool-driver://msg?kind=log&level=ok&code=clickedCreate&a=me%40z.ai")
+        let v = parse_message(&json!({"kind":"log","level":"ok","code":"clickedCreate","a":"me@z.ai"}))
             .unwrap();
         let s = summarize(&v);
         assert!(s.contains("kind=log"));
@@ -191,8 +175,61 @@ mod tests {
     #[test]
     fn summarize_truncates_long_values() {
         let big = "x".repeat(5000);
-        let v = parse_message(&format!("zpool-driver://msg?kind=log&code=page&a={big}")).unwrap();
+        let v = parse_message(&json!({"kind":"log","code":"page","a":big})).unwrap();
         let s = summarize(&v);
         assert!(s.chars().count() < 300);
+    }
+
+    #[test]
+    fn summary_does_not_store_authorization_secrets() {
+        let msg = json!({"kind":"page", "url":"https://zcode.z.ai/callback?code=secret-code&state=secret-state#secret-fragment"});
+        let s = summarize(&msg);
+        assert!(s.contains("https://zcode.z.ai/callback"));
+        assert!(!s.contains("secret-"), "日志不能存授权参数：{s}");
+        let s = summarize(&json!({"kind":"log","code":"loginClicked","a":"fixture-phone","b":"123456"}));
+        assert!(!s.contains("123456"), "日志不能存短信验证码");
+    }
+
+    #[tauri::command]
+    fn privileged_probe() -> bool { true }
+
+    #[test]
+    fn ipc_permissions_only_allow_login_pages_to_report_their_own_flow() {
+        use std::sync::{Arc, Mutex};
+        use tauri::Listener;
+        let app = tauri::test::mock_builder()
+            .plugin(plugin())
+            .invoke_handler(tauri::generate_handler![privileged_probe])
+            .build(tauri::generate_context!())
+            .unwrap();
+        let flow = uuid::Uuid::new_v4().to_string();
+        let label = crate::login_label(&flow);
+        let login = tauri::WebviewWindowBuilder::new(&app, &label,
+            tauri::WebviewUrl::External("https://chat.z.ai/auth".parse().unwrap())).build().unwrap();
+        let main = tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap();
+        let request = |cmd: &str, url: &str| tauri::webview::InvokeRequest {
+            cmd: cmd.into(), callback: tauri::ipc::CallbackFn(0), error: tauri::ipc::CallbackFn(1),
+            url: url.parse().unwrap(),
+            body: tauri::ipc::InvokeBody::Json(json!({"message":{"kind":"ready","flow":"forged-flow","token":"secret"}})),
+            headers: Default::default(), invoke_key: tauri::test::INVOKE_KEY.into(),
+        };
+        crate::pending_insert(crate::PendingOAuth { provider: "zai".into(), state: "fixture".into(), flow: flow.clone(), email: None });
+        let seen = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let events = seen.clone();
+        app.listen("reg://event", move |e| events.lock().unwrap().push(serde_json::from_str(e.payload()).unwrap()));
+        let result = tauri::test::get_ipc_response(&login, request("plugin:reg-driver|report", "https://chat.z.ai/auth"));
+        crate::pending_remove(&flow);
+        assert!(result.is_ok(), "允许的登录页面必须能使用实际 IPC：{result:?}");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0]["flow"], flow);
+        assert!(seen[0].get("token").is_none());
+        drop(seen);
+        for origin in ["https://example.com/", "https://chat.z.ai.evil.test/", "http://chat.z.ai/", "https://chat.z.ai@evil.test/"] {
+            assert!(tauri::test::get_ipc_response(&login, request("plugin:reg-driver|report", origin)).is_err(), "不能放行 {origin}");
+        }
+        assert!(tauri::test::get_ipc_response(&main, request("plugin:reg-driver|report", "https://chat.z.ai/auth")).is_err());
+        assert!(tauri::test::get_ipc_response(&login, request("privileged_probe", "https://chat.z.ai/auth")).is_err());
+        assert!(tauri::test::get_ipc_response(&main, request("privileged_probe", "http://tauri.localhost")).is_ok(), "不能破坏主窗口现有命令权限");
     }
 }

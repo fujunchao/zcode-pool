@@ -116,23 +116,11 @@
     S.entrySince = Number(saved.entrySince) || 0;
   })();
 
-  function q(kv) {
-    var out = [];
-    for (var k in kv) {
-      if (!Object.prototype.hasOwnProperty.call(kv, k)) continue;
-      var v = kv[k];
-      if (v === null || v === undefined || v === "") continue;
-      out.push(encodeURIComponent(k) + "=" + encodeURIComponent(String(v)));
-    }
-    return out.join("&");
-  }
-
   var pageReady = document.readyState !== "loading";
   var outbox = [];
   var flushing = false;
   var flushTimer = 0;
   var retryTimer = 0;
-  var halted = false;
 
   function go(url) {
     try {
@@ -141,11 +129,7 @@
   }
 
   function reloadPage() {
-    halted = true;
-    clearTimeout(flushTimer);
     clearTimeout(retryTimer);
-    flushing = false;
-    drainNow();
     setTimeout(function () {
       try {
         location.reload();
@@ -154,7 +138,6 @@
       function retry() {
         tries += 1;
         if (tries > 2) {
-          halted = false;
           return;
         }
         try {
@@ -167,43 +150,43 @@
   }
 
   function flush() {
-    if (halted || flushing || !outbox.length) return;
+    if (flushing || !outbox.length) return;
+    var ipc = window.__TAURI_INTERNALS__;
+    if (!ipc || typeof ipc.invoke !== "function") {
+      // 初始化顺序可能晚于网页脚本。只等待 IPC，绝不回退到修改 location。
+      clearTimeout(flushTimer);
+      flushTimer = setTimeout(flush, 250);
+      return;
+    }
     flushing = true;
     var msg = outbox.shift();
-    go("zpool-driver://msg?" + q(msg));
-    flushTimer = setTimeout(function () {
-      flushing = false;
-      flush();
-    }, 160);
+    // 用不触发导航的 IPC，避免授权回调被排队的 phase/log 消息打断。
+    Promise.resolve()
+      .then(function () { return ipc.invoke("plugin:reg-driver|report", { message: msg }); })
+      .catch(function () {
+        // 页面切换时旧文档的响应可能失效；不重放消息，也不暴露原始参数。
+        console.warn("[zpool-driver] 状态上报未完成，等待新页面重新连接");
+      })
+      .then(function () {
+        flushing = false;
+        flush();
+      });
   }
 
   function send(msg) {
-    if (halted) return;
     outbox.push(msg);
     if (outbox.length > 80) outbox.splice(0, outbox.length - 80);
     if (pageReady) flush();
   }
 
-  function drainNow() {
-    while (outbox.length) {
-      var m = outbox.shift();
-      go("zpool-driver://msg?" + q(m));
-    }
-  }
-
   function navTo(url) {
-    halted = true;
-    clearTimeout(flushTimer);
     clearTimeout(retryTimer);
-    flushing = false;
-    drainNow();
     setTimeout(function () {
       go(url);
       var tries = 0;
       function retry() {
         tries += 1;
         if (tries > 2) {
-          halted = false; 
           fail("navStuck", url);
           return;
         }
@@ -831,8 +814,12 @@
       phase("confirm-authorize");
       if (!S.authorized) {
         S.authorized = true;
-        await confirmAuthorize(45000);
-        phase("done");
+        if (await confirmAuthorize(45000)) {
+          phase("await-callback");
+          note("awaitCallback");
+        } else {
+          S.authorized = false;
+        }
       }
       return;
     }
@@ -885,7 +872,8 @@
 
     if (page === "zcode-bridge") {
       S.stopped = true;
-      clearNote();
+      phase("await-callback");
+      note("awaitCallback");
       return;
     }
 
@@ -1064,7 +1052,12 @@
         } else if (m.action === "confirm-authorize") {
           S.mode = "login";
           saveState();
-          confirmAuthorize(45000).then(function () { phase("done"); });
+          confirmAuthorize(45000).then(function (accepted) {
+            if (accepted) {
+              phase("await-callback");
+              note("awaitCallback");
+            }
+          });
         } else if (m.action === "open-signup") {
           S.mode = "register";
           S.wentSignup = true;
