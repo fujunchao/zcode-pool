@@ -132,6 +132,33 @@ struct Geometry {
     scale: f64,
 }
 
+pub(crate) async fn supports_position(app: &AppHandle, label: &str) -> Result<bool, String> {
+    with_window(app, label, |_window| {
+        #[cfg(target_os = "linux")]
+        {
+            use gtk::prelude::*;
+            // 检查实际连接的后端，而不是环境变量：Wayland 不允许客户端控制全局坐标。
+            let display = _window.gtk_window().map_err(layout_error)?.display();
+            return Ok(display.type_().name() != "GdkWaylandDisplay");
+        }
+        #[cfg(not(target_os = "linux"))]
+        Ok(true)
+    })
+    .await
+}
+
+fn move_window(
+    window: &WebviewWindow,
+    position: PhysicalPosition<i32>,
+    _scale: f64,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let position =
+        tauri::LogicalPosition::new(position.x as f64 / _scale, position.y as f64 / _scale);
+    // macOS 的全局逻辑坐标要按目标屏幕缩放换算，不能让 Tao 使用移动前屏幕的 DPI。
+    window.set_position(position).map_err(layout_error)
+}
+
 // setter 返回只说明请求已入队；让出事件循环，等实际几何生效后才能校验或继续修正。
 async fn wait_geometry(
     app: &AppHandle,
@@ -190,6 +217,7 @@ async fn wait_geometry(
 }
 
 async fn apply(app: &AppHandle, label: &str, placement: Placement) -> Result<(), String> {
+    let positioned = supports_position(app, label).await?;
     with_window(app, label, |window| {
         if window.is_maximized().map_err(layout_error)? {
             window.unmaximize().map_err(layout_error)?;
@@ -205,14 +233,18 @@ async fn apply(app: &AppHandle, label: &str, placement: Placement) -> Result<(),
     wait_geometry(app, label, None, None).await?;
 
     let target = PhysicalPosition::new(placement.outer.x, placement.outer.y);
-    with_window(app, label, move |window| {
-        window.set_position(target).map_err(layout_error)
-    })
-    .await?;
+    if positioned {
+        with_window(app, label, move |window| {
+            move_window(window, target, placement.scale)
+        })
+        .await?;
+    }
     // Windows 跨屏移动会改变 DPI；macOS 移动则排入主队列，必须等移动生效再定尺寸。
     // GTK 隐藏窗口没有有效的几何事件，先提交初始位置/尺寸，再映射后确认。
     #[cfg(not(target_os = "linux"))]
-    wait_geometry(app, label, None, Some(target)).await?;
+    if positioned {
+        wait_geometry(app, label, None, Some(target)).await?;
+    }
 
     let mut size: tauri::Size =
         LogicalSize::new(placement.inner.width, placement.inner.height).into();
@@ -258,11 +290,13 @@ async fn apply(app: &AppHandle, label: &str, placement: Placement) -> Result<(),
         .y
         .clamp(area.y, area.y + area.height - geometry.outer.height as i32);
     let target = PhysicalPosition::new(x, y);
-    with_window(app, label, move |window| {
-        window.set_position(target).map_err(layout_error)
-    })
-    .await?;
-    let geometry = wait_geometry(app, label, Some(size), Some(target)).await?;
+    if positioned {
+        with_window(app, label, move |window| {
+            move_window(window, target, placement.scale)
+        })
+        .await?;
+    }
+    let geometry = wait_geometry(app, label, Some(size), positioned.then_some(target)).await?;
     with_window(app, label, move |window| {
         window
             .set_min_size(Some(LogicalSize::new(
@@ -276,7 +310,7 @@ async fn apply(app: &AppHandle, label: &str, placement: Placement) -> Result<(),
             window.label().trim_start_matches("login-"),
             "layout",
             &format!(
-                "slot={} pos=({x},{y}) outer={}x{} layered={}",
+                "slot={} requested_pos=({x},{y}) positioned={positioned} outer={}x{} layered={}",
                 placement.slot, geometry.outer.width, geometry.outer.height, placement.layered,
             ),
         );

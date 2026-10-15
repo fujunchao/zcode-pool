@@ -5352,6 +5352,7 @@ dependencies = [
  "aes-gcm",
  "base64 0.22.1",
  "chrono",
+ "gtk",
  "iana-time-zone",
  "objc2",
  "pbkdf2",

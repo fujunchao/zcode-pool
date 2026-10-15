@@ -15,7 +15,7 @@ mod i18n {
     }
 }
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, LogicalSize, Manager, WebviewWindow};
@@ -39,15 +39,18 @@ fn bounds(window: &WebviewWindow) -> SmokeResult<(i32, i32, u32, u32)> {
     Ok((p.x, p.y, s.width, s.height))
 }
 
-fn assert_visible(window: &WebviewWindow) -> SmokeResult<()> {
+fn assert_visible(window: &WebviewWindow, positioned: bool) -> SmokeResult<()> {
     let monitor = window.current_monitor()?.ok_or("窗口没有所在显示器")?;
     let area = monitor.work_area();
     let (x, y, width, height) = bounds(window)?;
     if !window.is_visible()?
-        || x < area.position.x
-        || y < area.position.y
-        || x as i64 + width as i64 > area.position.x as i64 + area.size.width as i64
-        || y as i64 + height as i64 > area.position.y as i64 + area.size.height as i64
+        || width > area.size.width
+        || height > area.size.height
+        || (positioned
+            && (x < area.position.x
+                || y < area.position.y
+                || x as i64 + width as i64 > area.position.x as i64 + area.size.width as i64
+                || y as i64 + height as i64 > area.position.y as i64 + area.size.height as i64))
     {
         return Err(format!(
             "{} 未完整落在工作区：({x},{y}) {width}×{height} / {area:?}",
@@ -100,15 +103,21 @@ async fn smoke(app: &AppHandle) -> SmokeResult<()> {
     for n in 0..5 {
         windows.push(open(app, &format!("login-layout-{n}")).await?);
     }
+    let positioned = login_windows::supports_position(app, windows[0].label()).await?;
+    if std::env::var_os("ZPOOL_SMOKE_WAYLAND").is_some() && positioned {
+        return Err("没有识别实际 Wayland 后端".into());
+    }
     std::thread::sleep(Duration::from_millis(250));
     for window in &windows {
-        assert_visible(window)?;
+        assert_visible(window, positioned)?;
     }
     let before: Vec<_> = windows.iter().map(bounds).collect::<SmokeResult<_>>()?;
-    windows[1].set_focus()?;
-    wait_until("旧窗口获得焦点", || {
-        windows[1].is_focused().unwrap_or(false)
-    })?;
+    if positioned {
+        windows[1].set_focus()?;
+        wait_until("旧窗口获得焦点", || {
+            windows[1].is_focused().unwrap_or(false)
+        })?;
+    }
     let lost_focus = Arc::new(AtomicUsize::new(0));
     let focus_events = lost_focus.clone();
     windows[1].on_window_event(move |event| {
@@ -119,13 +128,14 @@ async fn smoke(app: &AppHandle) -> SmokeResult<()> {
     close(app, &windows[0])?;
     let replacement = open(app, "login-layout-replacement").await?;
     std::thread::sleep(Duration::from_millis(150));
-    let retained_focus = windows[1].is_focused()? && lost_focus.load(Ordering::SeqCst) == 0;
+    let retained_focus =
+        !positioned || (windows[1].is_focused()? && lost_focus.load(Ordering::SeqCst) == 0);
     println!("补位全程不抢旧窗口焦点：{retained_focus}");
-    if bounds(&replacement)? != before[0] {
+    if positioned && bounds(&replacement)? != before[0] {
         return Err("补位没有复用原槽位".into());
     }
     for n in 1..5 {
-        if bounds(&windows[n])? != before[n] {
+        if positioned && bounds(&windows[n])? != before[n] {
             return Err("补位移动或缩放了已有窗口".into());
         }
     }
@@ -148,8 +158,8 @@ async fn smoke(app: &AppHandle) -> SmokeResult<()> {
     std::thread::sleep(Duration::from_millis(150));
     login_windows::arrange(app).await?;
     std::thread::sleep(Duration::from_millis(150));
-    assert_visible(&windows[1])?;
-    assert_visible(&replacement)?;
+    assert_visible(&windows[1], positioned)?;
+    assert_visible(&replacement, positioned)?;
     if replacement.is_maximized()? {
         return Err("整理没有恢复最大化窗口".into());
     }
@@ -161,7 +171,7 @@ async fn smoke(app: &AppHandle) -> SmokeResult<()> {
     for n in 5..8 {
         let window = open(app, &format!("login-layout-{n}")).await?;
         std::thread::sleep(Duration::from_millis(100));
-        assert_visible(&window)?;
+        assert_visible(&window, positioned)?;
     }
     if !retained_focus {
         return Err("补位抢走了旧窗口的焦点".into());
@@ -171,16 +181,22 @@ async fn smoke(app: &AppHandle) -> SmokeResult<()> {
 }
 
 fn main() {
+    // macOS 的原生 run_return 可能忽略 exit(code) 的 code，独立保存测试结论防止假绿。
+    let exit_code = Arc::new(AtomicI32::new(1));
+    let outcome_code = exit_code.clone();
     let mut context = tauri::generate_context!();
     context.config_mut().identifier = "com.zpool.reg-layout-smoke".into();
     context.config_mut().app.windows.clear();
     let app = tauri::Builder::default()
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 let outcome = tauri::async_runtime::block_on(smoke(&handle));
                 match outcome {
-                    Ok(()) => handle.exit(0),
+                    Ok(()) => {
+                        outcome_code.store(0, Ordering::SeqCst);
+                        handle.exit(0);
+                    }
                     Err(error) => {
                         eprintln!("原生布局回归失败：{error}");
                         handle.exit(1);
@@ -197,5 +213,6 @@ fn main() {
         })
         .build(context)
         .expect("创建原生布局测试环境失败");
-    std::process::exit(app.run_return(|_, _| {}));
+    app.run_return(|_, _| {});
+    std::process::exit(exit_code.load(Ordering::SeqCst));
 }

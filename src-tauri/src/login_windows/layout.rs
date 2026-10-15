@@ -34,6 +34,7 @@ pub(super) struct Placement {
     pub outer: Rect,
     pub inner: Size,
     pub work_area: Rect,
+    pub scale: f64,
     pub slot: usize,
     pub layered: bool,
 }
@@ -132,6 +133,7 @@ impl Layout {
             },
             inner: self.inner,
             work_area: area,
+            scale: self.display.scale,
             slot,
             layered: self.layered || layer > 0,
         }
