@@ -8,7 +8,7 @@ import {
   setMboxRerender, mboxLoad, mboxPage, mboxFilter, mboxToggle, mboxImport,
   mboxRemove, mboxDelete, mboxSelection, mboxVerify, mboxStop, mboxOnFlowDone, mboxRunning, mboxStats,
   mboxSelectAll, mboxSelectNone, mboxToggleRow, mboxExport, mboxRetryFailed, mboxDismissResult, mboxUpdateLine, mboxReauth,
-  mboxCfCreate, mboxOnTerminated, setMboxConc,
+  mboxCfCreate, mboxOnTerminated, setMboxConc, mboxHeadSync,
 } from "./mbox.js";
 
 const $app = document.getElementById("app");
@@ -1594,6 +1594,7 @@ function render() {
   $app.innerHTML = `<div class="shell">${sidebar}<div class="content page-${tab}">${body}</div></div>`;
   restoreScroll(scrollCap);
   acctHeadSync();
+  mboxHeadSync();
 }
 
 window.actions = actions;

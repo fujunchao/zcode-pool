@@ -70,6 +70,7 @@ function kindChip(a) {
 
 export function mboxPage() {
   const b = M.batch;
+  const verifyN = selectedNewEmails().length; // 「批量验证」仅覆盖选中项里的待验证（new）
   const verified = M.list.filter((a) => a.status === "verified").length;
   const attention = M.list.filter((a) => a.status === "failed" || a.status === "invalid").length;
   const activeList = [...b.active.values()].map((v) => v.email);
@@ -136,7 +137,7 @@ export function mboxPage() {
           ${[1, 2, 3, 4, 5].map((n) => `<option value="${n}" ${M.conc === n ? "selected" : ""}>${n}</option>`).join("")}
         </select>
       </label>
-      <button class="btn" click="actions.mboxVerify()" ${!M.sel.size || b.running ? "disabled" : ""}>${ic("play", 14)} ${t("mb.verify")}${M.sel.size ? ` (${M.sel.size})` : ""}</button>
+      <button class="btn" click="actions.mboxVerify()" ${!verifyN || b.running ? "disabled" : ""}>${ic("play", 14)} ${t("mb.verify")}${verifyN ? ` (${verifyN})` : ""}</button>
       <button class="btn" click="actions.mboxStop()" ${b.running ? "" : "disabled"}>${ic("power", 14)} ${t("mb.stop")}</button>
       <span class="spacer"></span>
       <button class="btn d" click="actions.mboxDelete()" ${M.sel.size && !b.running ? "" : "disabled"}>${ic("trash", 14)} ${t("mb.delete")}${M.sel.size ? ` (${M.sel.size})` : ""}</button>
@@ -178,9 +179,32 @@ export function mboxPage() {
     </div>`;
 }
 
+/** 当前筛选视图的选择统计：已选行数 / 总行数（全选态与部分选中态共用） */
+function selStats(rows) {
+  const on = rows.reduce((n, a) => n + (M.sel.has(a.email) ? 1 : 0), 0);
+  return { on, total: rows.length };
+}
+
 function selAllOn(rows) {
-  const newOnes = rows.filter((a) => a.status === "new");
-  return newOnes.length > 0 && newOnes.every((a) => M.sel.has(a.email));
+  const s = selStats(rows);
+  return s.total > 0 && s.on === s.total;
+}
+
+/** 同步「全选」复选框：全选 / 部分选中（indeterminate）/ 未选。DOM 挂载后调用。 */
+export function mboxHeadSync() {
+  const all = document.getElementById("mb-all");
+  if (!all) return;
+  const s = selStats(filtered());
+  all.checked = s.total > 0 && s.on === s.total;
+  all.indeterminate = s.on > 0 && s.on < s.total;
+}
+
+/** 选中集中「待验证」（status === "new"）的邮箱 —— 批量验证与其按钮计数共用 */
+function selectedNewEmails() {
+  return [...M.sel].filter((e) => {
+    const a = M.list.find((x) => x.email === e);
+    return a && a.status === "new";
+  });
 }
 
 
@@ -194,10 +218,10 @@ export function mboxToggle(email, on) {
   else M.sel.delete(email);
 }
 
+/** 全选 / 取消全选：作用于当前筛选视图的全部行（与行级勾选一致，不限状态）。 */
 export function mboxSelectAll(on) {
   if (M.batch.running) return;
   for (const a of filtered()) {
-    if (a.status !== "new") continue;
     if (on) M.sel.add(a.email);
     else M.sel.delete(a.email);
   }
@@ -377,10 +401,7 @@ export async function mboxReauth(email) {
 
 
 export async function mboxVerify() {
-  const emails = [...M.sel].filter((e) => {
-    const a = M.list.find((x) => x.email === e);
-    return a && a.status === "new";
-  });
+  const emails = selectedNewEmails();
   if (!emails.length) {
     toast(t("mb.nothingToVerify"), "warn");
     return;
