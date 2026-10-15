@@ -182,6 +182,7 @@ async fn wait_geometry(
     position: Option<PhysicalPosition<i32>>,
 ) -> Result<Geometry, String> {
     let deadline = Instant::now() + Duration::from_secs(3);
+    let mut last_request = Instant::now();
     loop {
         let geometry = with_window(app, label, move |window| {
             if window.is_maximized().map_err(layout_error)?
@@ -208,9 +209,14 @@ async fn wait_geometry(
                     return Ok(None);
                 }
             }
+            let outer = window.outer_size().map_err(layout_error)?;
+            if size.is_some() && (outer.width < inner.width || outer.height < inner.height) {
+                // GTK 隐藏窗口的初始外框缓存不是实际尺寸，等首个 configure 事件更新它。
+                return Ok(None);
+            }
             Ok(Some(Geometry {
                 inner,
-                outer: window.outer_size().map_err(layout_error)?,
+                outer,
                 scale,
             }))
         })
@@ -226,6 +232,17 @@ async fn wait_geometry(
                 ))
             }).await?;
             return Err(layout_error(detail));
+        }
+        if let Some(size) = size {
+            if last_request.elapsed() >= Duration::from_millis(120) {
+                // GTK 恢复最大化时，装饰边距可晚于状态位更新；边距稳定后重新提交
+                // 同一个目标尺寸，不能把仍变化的旧外框差值当作缩小窗口的依据。
+                with_window(app, label, move |window| {
+                    window.set_size(size).map_err(layout_error)
+                })
+                .await?;
+                last_request = Instant::now();
+            }
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
