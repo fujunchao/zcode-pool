@@ -36,7 +36,7 @@ export async function batchHarness(concurrency = 2, total = 12) {
     "./i18n.js": { t: key => key },
     "./icons.js": { ic: () => "" },
     "./ui.js": { esc: value => String(value ?? ""), toast() {}, openLineModal() {} },
-    "./reg.js": { regStart: flow => panels.push(flow), regBatchSet() {}, regClose() {} },
+    "./reg.js": { regStart: flow => panels.push(flow), regClose() {} },
   };
   const module = new vm.SourceTextModule(fs.readFileSync(new URL("../../../src/mbox.js", import.meta.url), "utf8"), { context });
   await module.link(specifier => {

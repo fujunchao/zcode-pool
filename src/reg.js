@@ -25,6 +25,8 @@ const PAGE_KEYS = {
 
 const MAX_LOGS = 200;
 const CARD_LOGS = 3;
+const EARLY_EVENT_TTL = 120_000;
+const MAX_EARLY_FLOWS = 10;
 
 const LINK_POLL_MS = 3000;
 const LINK_POLL_TRIES = 30;
@@ -35,6 +37,8 @@ const shortMail = (s) => String(s || "").split("@")[0] || "";
 
 /** 并发注册：每个 OAuth 流程（flow）一个 session，并行并存。 */
 let sessions = new Map();
+// WebView 可能先于开窗 IPC 响应加载；按 flow 暂存，绑定批次邮箱后才处理请求。
+const earlyEvents = new Map();
 let drawer = null;
 let tiling = false;
 let modal = null;
@@ -49,8 +53,25 @@ export function setRegTerminated(fn) {
   onTerminated = fn;
 }
 
-function terminate(flow, reason) {
-  if (onTerminated) onTerminated(flow, reason);
+function terminate(flow, reason, result) {
+  if (onTerminated) onTerminated(flow, reason, result);
+}
+
+function bufferEarlyEvent(ev) {
+  const now = Date.now();
+  for (const [flow, pending] of earlyEvents) {
+    if (now - pending.at >= EARLY_EVENT_TTL) earlyEvents.delete(flow);
+  }
+  if (!earlyEvents.has(ev.flow)) {
+    if (earlyEvents.size >= MAX_EARLY_FLOWS) earlyEvents.delete(earlyEvents.keys().next().value);
+    earlyEvents.set(ev.flow, { at: now, events: [] });
+  }
+  const pending = earlyEvents.get(ev.flow);
+  pending.events.push(ev);
+  if (pending.events.length > MAX_LOGS) {
+    const index = pending.events.findIndex(e => !["ask", "result", "closed"].includes(e.kind));
+    pending.events.splice(index < 0 ? 0 : index, 1);
+  }
 }
 
 function shortFlow(flow) {
@@ -76,7 +97,7 @@ export function regActive() {
   return sessions.size > 0;
 }
 
-export function regStart(flow, mode, provider) {
+export function regStart(flow, mode, provider, batchEmail = "") {
   sessions.set(flow, {
     flow,
     mode,
@@ -89,27 +110,32 @@ export function regStart(flow, mode, provider) {
     finished: false,
     startedAt: Date.now(),
     signupEmail: "",
-    batchEmail: "",
+    batchEmail,
     linkAuto: 0,
     submittedAt: 0,
     linkBusy: false,
   });
   pushLog(sessions.get(flow), "info", "connected", provider);
   render();
-}
-
-export function regBatchSet(flow, email) {
-  const s = sessions.get(flow);
-  if (s) s.batchEmail = email || "";
+  const pending = earlyEvents.get(flow);
+  earlyEvents.delete(flow);
+  if (pending && Date.now() - pending.at < EARLY_EVENT_TTL) {
+    // 已收口的流程不能再执行缓存中的填表/取信请求；result 比迟到的 closed 更权威。
+    const newest = pending.events.slice().reverse();
+    const terminal = newest.find(e => e.kind === "result") || newest.find(e => e.kind === "closed");
+    for (const event of terminal ? [terminal] : pending.events) regEvent(event);
+  }
 }
 
 /** 无参 = 全部关闭；带 flow = 只移除一个 session。 */
 export function regClose(flow) {
   if (flow) {
+    earlyEvents.delete(flow);
     sessions.delete(flow);
     if (modalFlow === flow) closeModal();
     modalQueue = modalQueue.filter((q) => q.flow !== flow);
   } else {
+    earlyEvents.clear();
     sessions = new Map();
     modalQueue = [];
     closeModal();
@@ -125,8 +151,9 @@ export function regClose(flow) {
 
 export function regEvent(ev) {
   if (!ev || typeof ev !== "object") return;
+  if (typeof ev.flow !== "string" || !ev.flow) return;
   const s = sessions.get(ev.flow);
-  if (!s) return;
+  if (!s) return bufferEarlyEvent(ev);
   // 宿主已收口后，旧页面的在途状态消息不能把成功/失败改回“运行中”。
   if (s.finished && ev.kind !== "log") return;
   switch (ev.kind) {
@@ -136,6 +163,7 @@ export function regEvent(ev) {
       s.failed = ev.ok === false;
       s.phase = s.failed ? "failed" : "done";
       s.note = s.failed ? String(ev.error || "") : "";
+      terminate(s.flow, "result", { ok: !s.failed, error: s.note });
       break;
     case "ready":
       pushLog(s, "info", "connected", ev.provider || s.provider);
@@ -190,6 +218,7 @@ async function autoSignup(s) {
   if (!email) return;
   try {
     const r = await invoke("pool_get", { email });
+    if (sessions.get(s.flow) !== s || s.closed || s.finished) return;
     s.signupEmail = r.email;
     await invoke("reg_input", {
       flow: s.flow,

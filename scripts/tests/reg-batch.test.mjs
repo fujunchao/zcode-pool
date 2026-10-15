@@ -55,3 +55,16 @@ test("初始化失败归还名额，最后一个任务完成后批次正常结�
   assert.equal(h.api.mboxRunning(), false);
   assert.equal(h.calls.filter(c => c.command === "pool_mark_verified").length, 2);
 });
+
+test("重放的宿主最终结果与 OAuth 通知不会重复归还批次名额", async () => {
+  const h = await batchHarness(1, 1);
+  await h.start();
+  const flow = await h.resolve();
+  h.api.mboxOnTerminated(flow, "result", { ok: true });
+  await h.complete(flow);
+  await h.advance(400);
+  assert.equal(h.api.mboxRunning(), false);
+  const updates = h.calls.filter(c => c.command === "pool_mark_verified");
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].args.ok, true);
+});

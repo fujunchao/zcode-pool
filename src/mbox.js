@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { t } from "./i18n.js";
 import { ic } from "./icons.js";
 import { esc, toast, openLineModal } from "./ui.js";
-import { regStart, regBatchSet, regClose } from "./reg.js";
+import { regStart, regClose } from "./reg.js";
 
 let rerender = () => {};
 export function setMboxRerender(fn) {
@@ -465,8 +465,7 @@ async function startOne(b) {
       return;
     }
     b.active.set(flow, { email });
-    regStart(flow, "register", "zai");
-    regBatchSet(flow, email);
+    regStart(flow, "register", "zai", email);
     rerender();
   } finally {
     b.starting -= 1;
@@ -488,10 +487,14 @@ export function mboxOnFlowDone(flow, ok, note) {
   return true;
 }
 
-/** reg.js 的终止回调（skip 按钮 / 窗口被用户关掉）：只对属于本批次的 flow 收口。 */
-export function mboxOnTerminated(flow, reason) {
+/** reg.js 的收口回调：同时接住开窗响应前已完成、随后重放的最终结果。 */
+export function mboxOnTerminated(flow, reason, result) {
   const b = M.batch;
   if (!b.running || !b.active.has(flow)) return;
+  if (reason === "result") {
+    mboxOnFlowDone(flow, result?.ok !== false, result?.error || "");
+    return;
+  }
   if (reason === "skipped") {
     const info = b.active.get(flow);
     if (info) toast(t("mb.batch.skippedToast", { email: info.email }), "warn");

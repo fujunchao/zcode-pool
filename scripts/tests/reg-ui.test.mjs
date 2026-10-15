@@ -34,7 +34,7 @@ async function panel({ invoke = async () => ({}) } = {}) {
     return m;
   }
   const main = module(new URL("../../src/reg.js", import.meta.url).href);
-  await main.link((specifier, ref) => {
+  const link = (specifier, ref) => {
     if (specifier.startsWith("@tauri-apps/api/")) {
       return new vm.SyntheticModule(["invoke", "listen"], function () {
         this.setExport("invoke", invoke);
@@ -42,10 +42,20 @@ async function panel({ invoke = async () => ({}) } = {}) {
       }, { context });
     }
     return module(new URL(specifier, ref.identifier).href);
-  });
+  };
+  await main.link(link);
   await main.evaluate();
   return {
-    start(flow = "test-flow") { main.namespace.regStart(flow, "register", "zai"); },
+    start(flow = "test-flow", email = "") { main.namespace.regStart(flow, "register", "zai", email); },
+    close(flow) { main.namespace.regClose(flow); },
+    terminated(callback) { main.namespace.setRegTerminated(callback); },
+    async batch() {
+      const batch = module(new URL("../../src/mbox.js", import.meta.url).href);
+      await batch.link(link);
+      await batch.evaluate();
+      main.namespace.setRegTerminated(batch.namespace.mboxOnTerminated);
+      return batch.namespace;
+    },
     event(ev) { listeners.get("reg://event")({ payload: { flow: "test-flow", ...ev } }); },
     html() { return nodes.find(n => n.className === "drw")?.innerHTML || ""; },
     button(act) { return nodes.find(n => n.className === "drw")?.buttons.find(b => b.dataset.act === act); },
@@ -99,3 +109,73 @@ test("整理窗口进行中禁用重复操作，失败后提示并恢复按钮",
   assert.match(p.toasts(), /模拟窗口定位失败/);
   assert.doesNotMatch(p.html(), /data-act="tile" disabled/);
 });
+
+test("页面填表请求早于开窗响应时，批次绑定邮箱后仍能自动填表", async () => {
+  const calls = [];
+  const p = await panel({ invoke: async (command, args) => {
+    calls.push({ command, args });
+    return { email: "fixture@example.invalid", password: "fixture-password" };
+  } });
+  p.event({ kind: "phase", phase: "signup-form" });
+  p.event({ kind: "ask", ask: "signup" });
+  assert.equal(calls.length, 0, "宿主尚未绑定 flow 时不得操作账号");
+  p.start("test-flow", "fixture@example.invalid");
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  assert.equal(calls.filter(c => c.command === "pool_get").length, 1);
+  assert.equal(calls.filter(c => c.command === "reg_input" && c.args.flow === "test-flow").length, 1);
+  assert.match(p.html(), /reg-task-stage[^>]*>填写注册信息/);
+});
+
+test("开窗响应前已收到最终结果时，只重放结果而不执行过期填表请求", async () => {
+  const calls = [], results = [];
+  const p = await panel({ invoke: async command => { calls.push(command); return {}; } });
+  p.terminated((...args) => results.push(args));
+  p.event({ kind: "ask", ask: "signup" });
+  p.event({ kind: "result", ok: true });
+  p.start("test-flow", "fixture@example.invalid");
+  assert.match(p.html(), /reg-task-stage[^>]*>入库完成/);
+  assert.equal(calls.length, 0);
+  assert.equal(results.length, 1, "早到的最终结果也必须让批次归还名额");
+  assert.equal(results[0][0], "test-flow");
+  assert.equal(results[0][1], "result");
+});
+
+test("关闭面板会清除尚未绑定的旧流程事件", async () => {
+  const p = await panel();
+  p.event({ kind: "result", ok: true });
+  p.close();
+  p.start();
+  assert.doesNotMatch(p.html(), /reg-task-stage[^>]*>入库完成/);
+});
+
+for (const completed of [false, true]) {
+  test(`真实批次模块接住开窗响应前的${completed ? "完成结果" : "单次填表请求"}`, async () => {
+    const calls = [];
+    let finishOpen;
+    const email = "fixture@example.invalid";
+    const p = await panel({ invoke: async (command, args) => {
+      calls.push({ command, args });
+      if (command === "pool_list") return { accounts: [{ email, status: "new" }] };
+      if (command === "oauth_begin") return new Promise(resolve => { finishOpen = resolve; });
+      return { email, password: "fixture-password" };
+    } });
+    const batch = await p.batch();
+    await batch.mboxLoad();
+    batch.mboxToggle(email, true);
+    batch.setMboxConc(1);
+    await batch.mboxVerify();
+    p.event({ kind: "ask", ask: "signup" });
+    if (completed) p.event({ kind: "result", ok: true });
+    finishOpen({ flow: "test-flow" });
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+    if (completed) {
+      assert.equal(batch.mboxRunning(), false);
+      assert.equal(calls.filter(c => c.command === "pool_mark_verified" && c.args.ok).length, 1);
+      assert.equal(calls.filter(c => c.command === "reg_input").length, 0);
+    } else {
+      const inputs = calls.filter(c => c.command === "reg_input");
+      assert.equal(inputs.length, 1);
+      assert.equal(inputs[0].args.value.email, email);
+    }
+  });
+}
