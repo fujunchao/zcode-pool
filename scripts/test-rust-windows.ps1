@@ -18,9 +18,17 @@ try {
     } else {
         $output = & cargo test --locked --manifest-path src-tauri/Cargo.toml --no-run --message-format=json
     }
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    $artifacts = @($output | ForEach-Object {
+    $compileCode = $LASTEXITCODE
+    $records = @($output | ForEach-Object {
         try { $v = $_ | ConvertFrom-Json } catch { return }
+        if ($v.reason -eq 'compiler-message' -and $v.message.rendered) {
+            Write-Host $v.message.rendered
+        }
+        $v
+    })
+    if ($compileCode -ne 0) { exit $compileCode }
+    $artifacts = @($records | ForEach-Object {
+        $v = $_
         if ($v.reason -ne 'compiler-artifact' -or -not $v.executable) { return }
         if (($Smoke -and $v.target.name -eq 'reg_driver_smoke') -or (-not $Smoke -and $v.profile.test)) {
             $v.executable
@@ -35,13 +43,15 @@ try {
         Write-Host "嵌入测试清单：$path"
         & $mt.FullName -nologo -manifest $manifest "-outputresource:$path;#1"
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        # 直接执行刚刚嵌入清单的产物。再次 cargo test 可能重新链接并覆盖清单。
+        & $path
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
-    if ($Smoke) {
-        & $artifacts[0]
-    } else {
-        & cargo test --locked --manifest-path src-tauri/Cargo.toml
+    if (-not $Smoke) {
+        & cargo test --locked --manifest-path src-tauri/Cargo.toml --doc
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
-    exit $LASTEXITCODE
+    exit 0
 } finally {
     Pop-Location
 }
