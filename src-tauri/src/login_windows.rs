@@ -80,7 +80,7 @@ fn decoration(windows: &[WebviewWindow]) -> Size {
         if w.is_minimized().unwrap_or(true) || w.is_maximized().unwrap_or(true) {
             continue;
         }
-        if let (Ok(outer), Ok(inner), Ok(scale)) = (w.outer_size(), inner_size(w), w.scale_factor())
+        if let (Ok(outer), Ok(inner), Ok(scale)) = (outer_size(w), inner_size(w), w.scale_factor())
         {
             if scale.is_finite() && scale > 0.0 {
                 result.width = result
@@ -109,6 +109,26 @@ fn inner_size(window: &WebviewWindow) -> Result<PhysicalSize<u32>, String> {
     }
     #[cfg(not(target_os = "linux"))]
     window.inner_size().map_err(layout_error)
+}
+
+fn outer_size(window: &WebviewWindow) -> Result<PhysicalSize<u32>, String> {
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::prelude::*;
+        let native = window.gtk_window().map_err(layout_error)?;
+        let Some(surface) = native.window() else {
+            return Ok(PhysicalSize::new(0, 0));
+        };
+        // 与 GtkWindow::size 从同一原生状态读取，不能混用尚未更新的 Tao configure 缓存。
+        // 否则客户区已变小、外框仍是旧大值时，会被误当作越界再次缩小。
+        let frame = surface.frame_extents();
+        return Ok(
+            LogicalSize::new(frame.width().max(0) as u32, frame.height().max(0) as u32)
+                .to_physical(native.scale_factor() as f64),
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    window.outer_size().map_err(layout_error)
 }
 
 async fn on_main_thread<T: Send + 'static>(
@@ -209,7 +229,7 @@ async fn wait_geometry(
                     return Ok(None);
                 }
             }
-            let outer = window.outer_size().map_err(layout_error)?;
+            let outer = outer_size(window)?;
             if size.is_some() && (outer.width < inner.width || outer.height < inner.height) {
                 // GTK 隐藏窗口的初始外框缓存不是实际尺寸，等首个 configure 事件更新它。
                 return Ok(None);

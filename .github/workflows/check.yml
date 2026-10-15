@@ -137,5 +137,8 @@ jobs:
               sleep 0.1
             done
             test -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
-            src-tauri/target/debug/examples/reg_layout_smoke
+            for attempt in 1 2 3 4 5 6 7 8; do
+              echo "Wayland 原生布局回归：第 $attempt 轮"
+              src-tauri/target/debug/examples/reg_layout_smoke
+            done
           '
