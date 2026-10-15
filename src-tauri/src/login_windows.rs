@@ -161,6 +161,7 @@ async fn with_window<T: Send + 'static>(
     .await
 }
 
+#[derive(Clone, Copy, PartialEq)]
 struct Geometry {
     inner: PhysicalSize<u32>,
     outer: PhysicalSize<u32>,
@@ -203,6 +204,7 @@ async fn wait_geometry(
 ) -> Result<Geometry, String> {
     let deadline = Instant::now() + Duration::from_secs(3);
     let mut last_request = Instant::now();
+    let mut stable: Option<(Geometry, Instant)> = None;
     loop {
         let geometry = with_window(app, label, move |window| {
             if window.is_maximized().map_err(layout_error)?
@@ -242,7 +244,20 @@ async fn wait_geometry(
         })
         .await?;
         if let Some(geometry) = geometry {
-            return Ok(geometry);
+            if !cfg!(target_os = "linux") || size.is_none() {
+                return Ok(geometry);
+            }
+            // GTK 装饰、尺寸约束与配置事件可能分多帧生效；不能把瞬时匹配当成收敛。
+            match stable {
+                Some((previous, since)) if previous == geometry => {
+                    if since.elapsed() >= Duration::from_millis(120) {
+                        return Ok(geometry);
+                    }
+                }
+                _ => stable = Some((geometry, Instant::now())),
+            }
+        } else {
+            stable = None;
         }
         if Instant::now() >= deadline {
             let detail = with_window(app, label, move |window| {
@@ -253,7 +268,7 @@ async fn wait_geometry(
             }).await?;
             return Err(layout_error(detail));
         }
-        if let Some(size) = size {
+        if let Some(size) = size.filter(|_| geometry.is_none()) {
             if last_request.elapsed() >= Duration::from_millis(120) {
                 // GTK 恢复最大化时，装饰边距可晚于状态位更新；边距稳定后重新提交
                 // 同一个目标尺寸，不能把仍变化的旧外框差值当作缩小窗口的依据。
@@ -365,17 +380,20 @@ async fn apply(app: &AppHandle, label: &str, placement: Placement) -> Result<(),
             .map_err(layout_error)?;
         #[cfg(target_os = "linux")]
         window.set_focusable(true).map_err(layout_error)?;
-        flowlog::log(
-            window.label().trim_start_matches("login-"),
-            "layout",
-            &format!(
-                "slot={} requested_pos=({x},{y}) positioned={positioned} outer={}x{} layered={}",
-                placement.slot, geometry.outer.width, geometry.outer.height, placement.layered,
-            ),
-        );
         Ok(())
     })
-    .await
+    .await?;
+    // 最后设置的最小尺寸/可聚焦提示也可能触发 GTK 的装饰重算，必须在它们之后确认。
+    let geometry = wait_geometry(app, label, Some(size), positioned.then_some(target)).await?;
+    flowlog::log(
+        label.trim_start_matches("login-"),
+        "layout",
+        &format!(
+            "slot={} requested_pos=({x},{y}) positioned={positioned} outer={}x{} layered={}",
+            placement.slot, geometry.outer.width, geometry.outer.height, placement.layered,
+        ),
+    );
+    Ok(())
 }
 
 fn present(window: &WebviewWindow, focus: bool) -> Result<(), String> {
