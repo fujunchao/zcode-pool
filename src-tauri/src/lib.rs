@@ -6,6 +6,7 @@ mod driver;
 mod flowlog;
 mod gateway;
 mod graph;
+mod login_windows;
 mod oauth;
 mod pool;
 mod prompt;
@@ -459,9 +460,6 @@ fn pending_email(flow: &str) -> Option<String> {
         .filter(|e| !e.is_empty())
 }
 
-/// 登录窗口上限：并发需求（前端的并发泵）之外的兜底保护。
-const MAX_LOGIN_WINDOWS: usize = 5;
-
 fn login_label(flow: &str) -> String {
     format!("login-{}", flow.chars().take(12).collect::<String>())
 }
@@ -471,7 +469,7 @@ fn find_login_window(app: &AppHandle, flow: &str) -> Option<tauri::WebviewWindow
 }
 
 /// 已打开的全部登录窗口（label 前缀 `login-`），用于数量保护与"全部关闭"。
-fn login_windows(app: &AppHandle) -> Vec<(String, tauri::WebviewWindow)> {
+fn all_login_windows(app: &AppHandle) -> Vec<(String, tauri::WebviewWindow)> {
     let mut v: Vec<(String, tauri::WebviewWindow)> = app
         .webview_windows()
         .into_iter()
@@ -489,200 +487,10 @@ fn close_login_windows(app: &AppHandle, flow: Option<&str>) {
             }
         }
         None => {
-            for (_, w) in login_windows(app) {
+            for (_, w) in all_login_windows(app) {
                 let _ = w.close();
             }
         }
-    }
-}
-
-/// 登录窗口槽位布局：一次"窗口会话"内布局参数冻结在首次落位时刻 ——
-/// 新窗口只按槽位落位，**绝不重排已有窗口**（避免打扰正在过验证码的操作）。
-/// 唯一例外是用户主动点"整理窗口"（tile_login_windows）。
-#[derive(Clone, Copy)]
-struct LoginLayout {
-    x0: i32,
-    y0: i32,
-    ow: i32,
-    oh: i32,
-    gap: i32,
-    cols: i32,
-}
-
-/// 窗口 label（`login-<flow 前 12 位>`）→ 槽位序号。窗口关闭即释放，
-/// 新窗口取最小空闲槽位（优先复用刚消失窗口的位置）。
-static LOGIN_SLOTS: Mutex<BTreeMap<String, i32>> = Mutex::new(BTreeMap::new());
-/// 布局参数缓存：首个窗口落位时按 reg_concurrency 容量构建；
-/// 全部窗口关闭后失效重建（自动适配显示器/并发设置变化）。
-static LOGIN_LAYOUT: Mutex<Option<LoginLayout>> = Mutex::new(None);
-
-fn login_slots_guard() -> std::sync::MutexGuard<'static, BTreeMap<String, i32>> {
-    match LOGIN_SLOTS.lock() {
-        Ok(g) => g,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
-fn login_layout_guard() -> std::sync::MutexGuard<'static, Option<LoginLayout>> {
-    match LOGIN_LAYOUT.lock() {
-        Ok(g) => g,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
-/// 最小空闲槽位（0 起）。纯函数，便于测试。
-fn next_free_slot(used: &std::collections::BTreeSet<i32>) -> i32 {
-    let mut slot = 0;
-    while used.contains(&slot) {
-        slot += 1;
-    }
-    slot
-}
-
-/// 网格列数：容量（预计同时打开的窗口数）已定，挑"整组放得下"的最多列；都放不下则用物理上限。
-fn grid_cols(capacity: i32, avail_w: i32, avail_h: i32, ow: i32, oh: i32, gap: i32) -> i32 {
-    // 不重叠前提下每行最多几列
-    let cap = ((avail_w + gap) / (ow + gap)).clamp(1, capacity.max(1));
-    // 从大到小挑列数：优先整体高度放得下的最多列（行数最少）；都放不下则用 cap（纵向溢出、顶部对齐）
-    let mut cols = cap;
-    for c in (1..=cap).rev() {
-        let rows = (capacity + c - 1) / c;
-        if rows * oh + (rows - 1) * gap <= avail_h {
-            cols = c;
-            break;
-        }
-    }
-    cols
-}
-
-/// 槽位 → 物理坐标（行优先网格）。
-fn slot_xy(l: &LoginLayout, slot: i32) -> (i32, i32) {
-    let cols = l.cols.max(1);
-    let (r, c) = (slot / cols, slot % cols);
-    (l.x0 + c * (l.ow + l.gap), l.y0 + r * (l.oh + l.gap))
-}
-
-/// 计算一组布局参数（沿用旧平铺的显示器/尺寸/间距策略；容量替代原来的"当前窗口数"，
-/// 使槽位坐标与后续开窗数量无关 —— 这是"新窗口不打乱已有窗口"的前提）。
-fn compute_login_layout(app: &AppHandle, capacity: i32) -> Option<LoginLayout> {
-    let wins = login_windows(app);
-    // 目标显示器：主窗口所在屏 → 系统主屏 → 任一登录窗口所在屏
-    let mon = app
-        .get_webview_window("main")
-        .and_then(|m| m.current_monitor().ok().flatten())
-        .or_else(|| app.primary_monitor().ok().flatten())
-        .or_else(|| wins.iter().find_map(|(_, w)| w.current_monitor().ok().flatten()))?;
-    let (mp, ms, scale) = (mon.position(), mon.size(), mon.scale_factor());
-    if scale <= 0.0 || ms.width < 320 || ms.height < 240 {
-        return None;
-    }
-    // 实测窗口外框（物理像素，所有登录窗口同尺寸）；取不到就按 inner 480x680 + 系统边框估算
-    let (ow, oh) = wins
-        .iter()
-        .find_map(|(_, w)| w.outer_size().ok().map(|s| (s.width as i32, s.height as i32)))
-        .filter(|(w, h)| *w > 0 && *h > 0)
-        .unwrap_or(((500.0 * scale).round() as i32, (734.0 * scale).round() as i32));
-
-    let gap = (10.0 * scale).round() as i32;
-    let margin = (10.0 * scale).round() as i32;
-    let bottom = (52.0 * scale).round() as i32; // 底部预留（任务栏）
-    let avail_w = (ms.width as i32 - margin * 2).max(ow);
-    let avail_h = (ms.height as i32 - margin - bottom).max(oh);
-
-    let capacity = capacity.clamp(1, MAX_LOGIN_WINDOWS as i32);
-    let cols = grid_cols(capacity, avail_w, avail_h, ow, oh, gap);
-    let rows = (capacity + cols - 1) / cols;
-    let total_w = cols * ow + (cols - 1) * gap;
-    let total_h = rows * oh + (rows - 1) * gap;
-    let x0 = mp.x + margin + ((avail_w - total_w) / 2).max(0);
-    let y0 = mp.y + margin + ((avail_h - total_h) / 2).max(0);
-    Some(LoginLayout { x0, y0, ow, oh, gap, cols })
-}
-
-/// 取/建布局缓存（容量参数只在首次构建时生效）。
-fn ensure_login_layout(app: &AppHandle, capacity: i32) -> Option<LoginLayout> {
-    if let Some(l) = *login_layout_guard() {
-        return Some(l);
-    }
-    let l = compute_login_layout(app, capacity)?;
-    *login_layout_guard() = Some(l);
-    Some(l)
-}
-
-/// 为窗口分配槽位：最小空闲优先（刚关闭窗口的位置优先复用）。
-fn alloc_login_slot(app: &AppHandle, label: &str) -> i32 {
-    let mut g = login_slots_guard();
-    // 兜底清理：未走 CloseRequested/Destroyed 就消失的窗口（异常销毁等）
-    let stale: Vec<String> = g
-        .keys()
-        .filter(|k| app.get_webview_window(k).is_none())
-        .cloned()
-        .collect();
-    for k in stale {
-        g.remove(&k);
-    }
-    let used: std::collections::BTreeSet<i32> = g.values().copied().collect();
-    let slot = next_free_slot(&used);
-    g.insert(label.to_string(), slot);
-    slot
-}
-
-/// 释放槽位（窗口关闭/销毁时调用；幂等）。全部窗口退场即结束布局会话。
-fn release_login_slot(label: &str) {
-    let empty = {
-        let mut g = login_slots_guard();
-        g.remove(label);
-        g.is_empty()
-    };
-    if empty {
-        *login_layout_guard() = None;
-    }
-}
-
-/// 新窗口落位：分配最小空闲槽位 → 按槽位一次到位，不触碰其它窗口。
-fn place_login_window(app: &AppHandle, flow: &str, capacity: i32) {
-    let label = login_label(flow);
-    let slot = alloc_login_slot(app, &label);
-    let Some(l) = ensure_login_layout(app, capacity) else {
-        return;
-    };
-    if let Some(w) = app.get_webview_window(&label) {
-        let (x, y) = slot_xy(&l, slot);
-        let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
-        flowlog::log(flow, "slot", &format!("slot={slot} cols={} pos=({x},{y})", l.cols));
-    }
-}
-
-/// 手动"整理窗口"：把全部登录窗口整组重排为紧凑网格（唯一允许移动已有窗口的路径，
-/// 由 `reg_tile_windows` 命令在用户主动点击时触发）。随后按重排结果重建槽位映射与布局缓存，
-/// 后续新窗口继续循新布局落位。
-fn tile_login_windows(app: &AppHandle) {
-    let mut wins = login_windows(app);
-    let n = wins.len() as i32;
-    if n == 0 {
-        login_slots_guard().clear();
-        *login_layout_guard() = None;
-        return;
-    }
-    // 稳定顺序：已分配槽位的按槽位（= 视觉顺序），未记录的排最后
-    {
-        let g = login_slots_guard();
-        wins.sort_by_key(|(label, _)| g.get(label).copied().unwrap_or(i32::MAX));
-    }
-    let Some(l) = compute_login_layout(app, n) else {
-        return;
-    };
-    *login_layout_guard() = Some(l);
-    {
-        let mut g = login_slots_guard();
-        g.clear();
-        for (i, (label, _)) in wins.iter().enumerate() {
-            g.insert(label.clone(), i as i32);
-        }
-    }
-    for (i, (_, w)) in wins.iter().enumerate() {
-        let (x, y) = slot_xy(&l, i as i32);
-        let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
     }
 }
 
@@ -729,11 +537,11 @@ async fn oauth_begin(
         None => None,
     };
     // 布局容量：按当前并发设置预排网格，新窗口落位时不再依赖"当时窗口数"
-    let reg_capacity = settings.reg_concurrency() as i32;
-    if login_windows(&app).len() >= MAX_LOGIN_WINDOWS {
-        return Err(i18n::tr("err.reg.too_many"));
-    }
+    let reg_capacity = settings.reg_concurrency() as usize;
     let flow = new_flow_id();
+    let label = login_label(&flow);
+    // 在异步网络初始化前原子预占，直到原生窗口销毁才归还。
+    let permit = login_windows::reserve(&label, reg_capacity)?;
     flowlog::log(&flow, "begin", &format!("provider={provider} auto={auto} proxy={} client_ver={}", if proxy_url.is_some() { "on" } else { "off" }, quota::zcode_app_version()));
     let mid = uuid::Uuid::new_v4().to_string();
     let (p_init, m_init) = (provider.clone(), mid.clone());
@@ -772,13 +580,6 @@ async fn oauth_begin(
         expires_at_ms: init.expires_at_ms,
         interval_ms: init.poll_interval_ms,
     };
-    pending_insert(PendingOAuth {
-        provider: provider.clone(),
-        state: state.clone(),
-        flow: flow.clone(),
-        email: email.clone(),
-    });
-
     let login_root = app
         .path()
         .app_local_data_dir()
@@ -786,6 +587,11 @@ async fn oauth_begin(
         .join("login-webview");
     sweep_login_profiles(&login_root);
     let profile_dir = login_root.join(&flow);
+    let authorize_url = url.parse::<tauri::Url>()
+        .map_err(|e| i18n::trf("err.oauth.bad_authorize_url", &[("e", &e.to_string())]))?;
+    pending_insert(PendingOAuth {
+        provider: provider.clone(), state: state.clone(), flow: flow.clone(), email: email.clone(),
+    });
 
     let app2 = app.clone();
     let (provider2, state2, flow2, mid2) = (provider.clone(), state.clone(), flow.clone(), mid.clone());
@@ -800,14 +606,15 @@ async fn oauth_begin(
     let flow_load = flow.clone();
     let mut builder = tauri::WebviewWindowBuilder::new(
         &app,
-        login_label(&flow),
-        tauri::WebviewUrl::External(url.parse::<tauri::Url>().map_err(|e| i18n::trf("err.oauth.bad_authorize_url", &[("e", &e.to_string())]))?),
+        label.clone(),
+        tauri::WebviewUrl::External(authorize_url),
     )
     .title(login_title(email.as_deref()))
     .theme(Some(tauri::Theme::Dark))
-    .inner_size(480.0, 680.0)
+    .inner_size(login_windows::WIDTH, login_windows::HEIGHT)
     .min_inner_size(420.0, 560.0)
     .resizable(true)
+    .visible(false)
     .focused(!auto)
     // UA 不做覆盖：使用 WebView2 默认 UA（= Edge 真实 UA，随内核升级自动更新）。
     // 曾写死 Chrome/131 假 UA（与内核脱节、且覆盖 UA 会清掉 Sec-CH-UA-* 提示头），2026-10-14 移除。
@@ -816,7 +623,7 @@ async fn oauth_begin(
     if let Some(u) = proxy_url {
         builder = builder.proxy_url(u);
     }
-    builder
+    let window = builder
     .on_page_load(move |_, payload| {
         let event = match payload.event() {
             tauri::webview::PageLoadEvent::Started => "load-start",
@@ -850,32 +657,29 @@ async fn oauth_begin(
         flowlog::log(&flow, "window-fail", &m);
         m
     })?;
-    // 新窗口落位：按槽位一次到位 —— 优先复用已关闭窗口腾出的位置，
-    // 且不移动任何已有窗口（正过验证码的窗口不会被打断）。
-    place_login_window(&app, &flow, reg_capacity);
-    if let Some(w) = find_login_window(&app, &flow) {
-        #[cfg(windows)]
-        driver::observe_navigation(&w, &flow);
-        let app_close = app.clone();
-        let flow_evt2 = flow.clone();
-        let slot_key = login_label(&flow);
-        w.on_window_event(move |e| {
-            // 关闭/销毁即归还槽位，供后续新窗口复用（幂等）
-            if matches!(
-                e,
-                tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
-            ) {
-                release_login_slot(&slot_key);
+    #[cfg(windows)]
+    driver::observe_navigation(&window, &flow);
+    let app_close = app.clone();
+    let flow_evt2 = flow.clone();
+    window.on_window_event(move |e| {
+        if matches!(e, tauri::WindowEvent::Destroyed) {
+            permit.release();
+        }
+        if matches!(e, tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed) {
+            if pending_remove(&flow_close) {
+                flowlog::log(&flow_close, "cancelled", "");
+                let mut ev = driver::closed_event();
+                ev["flow"] = json!(flow_evt2.as_str());
+                let _ = app_close.emit("reg://event", ev);
             }
-            if let tauri::WindowEvent::CloseRequested { .. } = e {
-                if pending_remove(&flow_close) {
-                    flowlog::log(&flow_close, "cancelled", "");
-                    let mut ev = driver::closed_event();
-                    ev["flow"] = json!(flow_evt2.as_str());
-                    let _ = app_close.emit("reg://event", ev);
-                }
-            }
-        });
+        }
+    });
+    // 先在主线程落位再显示，只操作新窗口；定位失败销毁隐藏窗口并向前端返回错误。
+    if let Err(error) = login_windows::place(&app, &label, !auto).await {
+        pending_remove(&flow);
+        flowlog::log(&flow, "layout-fail", &error);
+        let _ = window.destroy();
+        return Err(error);
     }
     spawn_poll_loop(app.clone(), provider.clone(), flow.clone(), mid, poll_cfg);
     Ok(json!({ "opened": true, "provider": provider, "mode": assist_mode, "flow": flow, "email": email }))
@@ -1122,8 +926,7 @@ async fn reg_close_window(app: AppHandle, flow: Option<String>) -> Result<(), St
 /// 手动把全部登录窗口重新平铺归位（用户拖动乱之后）。
 #[tauri::command]
 async fn reg_tile_windows(app: AppHandle) -> Result<(), String> {
-    tile_login_windows(&app);
-    Ok(())
+    login_windows::arrange(&app).await
 }
 
 #[tauri::command]
@@ -2303,85 +2106,4 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn t_layout(cols: i32) -> LoginLayout {
-        LoginLayout { x0: 100, y0: 50, ow: 500, oh: 734, gap: 10, cols }
-    }
-
-    #[test]
-    fn next_free_slot_reuses_gaps() {
-        let set = |v: &[i32]| -> std::collections::BTreeSet<i32> { v.iter().copied().collect() };
-        assert_eq!(next_free_slot(&set(&[])), 0);
-        assert_eq!(next_free_slot(&set(&[0, 1, 2])), 3);
-        assert_eq!(next_free_slot(&set(&[1, 2])), 0);
-        assert_eq!(next_free_slot(&set(&[0, 2])), 1);
-        assert_eq!(next_free_slot(&set(&[1, 3])), 0);
-    }
-
-    #[test]
-    fn grid_cols_fits_capacity() {
-        // 1080p：可用 1900×1018，窗口 500×734，gap 10
-        assert_eq!(grid_cols(3, 1900, 1018, 500, 734, 10), 3); // 一行三列放得下
-        assert_eq!(grid_cols(2, 1900, 1018, 500, 734, 10), 2);
-        // 容量 5 时两行放不下（已知物理局限）→ 退到物理上限 3 列
-        assert_eq!(grid_cols(5, 1900, 1018, 500, 734, 10), 3);
-        // 窄屏：物理上限 2 列
-        assert_eq!(grid_cols(4, 1346, 1018, 500, 734, 10), 2);
-    }
-
-    #[test]
-    fn five_login_windows_stay_inside_1080p_work_area() {
-        let layout = LoginLayout {
-            x0: 10, y0: 10, ow: 500, oh: 734, gap: 10,
-            cols: grid_cols(5, 1900, 1018, 500, 734, 10),
-        };
-        for slot in 0..5 {
-            let (x, y) = slot_xy(&layout, slot);
-            assert!(x >= 0 && y >= 0 && x + layout.ow <= 1920 && y + layout.oh <= 1040,
-                "槽位 {slot} 越出工作区：({x}, {y})，尺寸 {}×{}", layout.ow, layout.oh);
-        }
-    }
-
-    #[test]
-    fn slot_xy_places_grid_row_major() {
-        let l = t_layout(3);
-        assert_eq!(slot_xy(&l, 0), (100, 50));
-        assert_eq!(slot_xy(&l, 1), (610, 50));
-        assert_eq!(slot_xy(&l, 2), (1120, 50));
-        assert_eq!(slot_xy(&l, 3), (100, 794));
-        assert_eq!(slot_xy(&l, 4), (610, 794));
-    }
-
-    /// v0.2.11 回归防线：并行注册 —— A 注册完毕关闭、新窗口 D 出现时，
-    /// D 必须占用 A 腾出的槽位（= 位置），且 B/C 的槽位与坐标全程不变。
-    /// 旧实现每次新窗口都对全部窗口重排，B/C 会被移动（过验证码的窗口被打断）。
-    #[test]
-    fn new_window_reuses_released_slot_without_moving_others() {
-        let mut slots: BTreeMap<String, i32> = BTreeMap::new();
-        let alloc = |m: &mut BTreeMap<String, i32>, k: &str| {
-            let used: std::collections::BTreeSet<i32> = m.values().copied().collect();
-            m.insert(k.to_string(), next_free_slot(&used));
-        };
-        alloc(&mut slots, "a");
-        alloc(&mut slots, "b");
-        alloc(&mut slots, "c");
-        assert_eq!((slots["a"], slots["b"], slots["c"]), (0, 1, 2));
-        let l = t_layout(3);
-        let before_b = slot_xy(&l, slots["b"]);
-        let before_c = slot_xy(&l, slots["c"]);
-
-        slots.remove("a"); // A 注册完毕/取消 → 窗口关闭释放槽位
-        alloc(&mut slots, "d"); // 新窗口出现
-
-        assert_eq!(slots["d"], 0, "新窗口应占用 A 腾出的槽位");
-        assert_eq!(slots["b"], 1, "已有窗口槽位不得变动");
-        assert_eq!(slots["c"], 2, "已有窗口槽位不得变动");
-        assert_eq!(slot_xy(&l, slots["b"]), before_b);
-        assert_eq!(slot_xy(&l, slots["c"]), before_c);
-    }
 }

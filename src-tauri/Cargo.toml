@@ -51,3 +51,7 @@ lto = "thin"
 [[example]]
 name = "reg_driver_smoke"
 test = false
+
+[[example]]
+name = "reg_layout_smoke"
+test = false

@@ -36,6 +36,7 @@ const shortMail = (s) => String(s || "").split("@")[0] || "";
 /** 并发注册：每个 OAuth 流程（flow）一个 session，并行并存。 */
 let sessions = new Map();
 let drawer = null;
+let tiling = false;
 let modal = null;
 let modalKind = null;
 let modalFlow = null;
@@ -364,7 +365,7 @@ function render() {
       <span class="drw-title">${esc(t("reg.title"))} · ${esc(modeLabel(list[0].mode))}</span>
       ${list.length > 1 ? `<span class="chip new">${esc(t("reg.runningCount", { n: activeN }))}</span>` : ""}
       <span class="spacer"></span>
-      ${list.length > 1 ? `<button class="btn sm" data-act="tile" title="${esc(t("reg.btn.tile"))}">${ic("tile", 12)} ${esc(t("reg.btn.tile"))}</button>` : ""}
+      ${list.length > 1 ? `<button class="btn sm" data-act="tile" ${tiling ? "disabled" : ""} title="${esc(t("reg.btn.tile"))}">${ic("tile", 12)} ${esc(t("reg.btn.tile"))}</button>` : ""}
       <button class="iconbtn" data-act="close" title="${esc(t("reg.btn.close"))}" style="color:var(--ink-2)">${ic("x", 14)}</button>
     </div>
     ${barHtml}
@@ -396,7 +397,17 @@ async function onAction(act, flow) {
   if (act === "close") return regClose();
   if (act === "skip") return doSkip(flow);
   if (act === "tile") {
-    invoke("reg_tile_windows").catch(() => {});
+    if (tiling) return;
+    tiling = true;
+    render();
+    try {
+      await invoke("reg_tile_windows");
+    } catch (e) {
+      toast(stripErr(e), "err");
+    } finally {
+      tiling = false;
+      render();
+    }
     return;
   }
   try {

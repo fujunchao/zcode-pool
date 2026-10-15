@@ -16,7 +16,7 @@ const M = {
   filter: "all",
   sel: new Set(),
   conc: 2,
-  batch: { running: false, concurrency: 2, queue: [], total: 0, done: 0, active: new Map(), results: [] },
+  batch: { running: false, concurrency: 2, starting: 0, pumping: false, queue: [], total: 0, done: 0, active: new Map(), results: [] },
   lastRun: null,
 };
 
@@ -401,6 +401,7 @@ export async function mboxReauth(email) {
 
 
 export async function mboxVerify() {
+  if (M.batch.running) return;
   const emails = selectedNewEmails();
   if (!emails.length) {
     toast(t("mb.nothingToVerify"), "warn");
@@ -410,6 +411,8 @@ export async function mboxVerify() {
   M.batch = {
     running: true,
     concurrency: M.conc,
+    starting: 0,
+    pumping: false,
     queue: emails.slice(),
     total: emails.length,
     done: 0,
@@ -420,40 +423,54 @@ export async function mboxVerify() {
   pump();
 }
 
-/** 并发泵：有空位就补位启动，直到队列空且全部收口。 */
-async function pump() {
-  const b = M.batch;
-  if (!b.running) return;
-  while (b.running && b.active.size < b.concurrency && b.queue.length) {
-    await startOne();
+/** 单批次只允许一个补位循环；错峰等待和初始化也占用并发名额。 */
+async function pump(b = M.batch) {
+  if (!b.running || b !== M.batch || b.pumping) return;
+  b.pumping = true;
+  try {
+    while (b.running && b === M.batch && b.active.size + b.starting < b.concurrency && b.queue.length) {
+      await startOne(b);
+    }
+    if (b.running && b === M.batch && !b.active.size && !b.starting && !b.queue.length) finishBatch(b);
+  } finally {
+    b.pumping = false;
   }
-  if (b.running && !b.active.size && !b.queue.length) finishBatch();
 }
 
-async function startOne() {
-  const b = M.batch;
+async function startOne(b) {
   const email = b.queue.shift();
   if (!email) return;
-  // 错峰启动（并发 >1 时）：1.2s 起跳 + 随机抖动，避免同一秒齐发
-  if (b.concurrency > 1) await sleep(1200 + Math.floor(Math.random() * 800));
-  if (!b.running) return;
-  let flow = "";
+  b.starting += 1;
   try {
-    const r = await invoke("oauth_begin", { provider: "zai", mode: "register", batch: true, email });
-    flow = String((r && r.flow) || "");
-    if (!flow) throw new Error(t("m.unknownErr"));
-  } catch (e) {
-    const msg = String(e).replace(/^[a-z_]+:/, "");
-    b.done += 1;
-    b.results.push({ email, ok: false, error: msg });
-    invoke("pool_mark_verified", { email, ok: false, note: msg }).catch(() => {});
-    mboxLoad().then(rerender);
-    return;
+    // 错峰启动（并发 >1 时）：1.2s 起跳 + 随机抖动，避免同一秒齐发。
+    if (b.concurrency > 1) await sleep(1200 + Math.floor(Math.random() * 800));
+    if (!b.running || b !== M.batch) return;
+    let flow = "";
+    try {
+      const r = await invoke("oauth_begin", { provider: "zai", mode: "register", batch: true, email });
+      flow = String((r && r.flow) || "");
+      if (!flow) throw new Error(t("m.unknownErr"));
+    } catch (e) {
+      if (!b.running || b !== M.batch) return;
+      const msg = String(e).replace(/^[a-z_]+:/, "");
+      b.done += 1;
+      b.results.push({ email, ok: false, error: msg });
+      invoke("pool_mark_verified", { email, ok: false, note: msg }).catch(() => {});
+      mboxLoad().then(rerender);
+      return;
+    }
+    // 停止无法撤回在途 IPC；只关闭迟到的旧 flow，不影响随后启动的新批次。
+    if (!b.running || b !== M.batch) {
+      await invoke("reg_close_window", { flow }).catch(() => {});
+      return;
+    }
+    b.active.set(flow, { email });
+    regStart(flow, "register", "zai");
+    regBatchSet(flow, email);
+    rerender();
+  } finally {
+    b.starting -= 1;
   }
-  b.active.set(flow, { email });
-  regStart(flow, "register", "zai");
-  regBatchSet(flow, email);
-  rerender();
 }
 
 /** 单任务收口（按 flow 配对）：OAuth 完成 / 跳过 / 关窗 共用。 */
@@ -467,7 +484,7 @@ export function mboxOnFlowDone(flow, ok, note) {
   b.results.push({ email: info.email, ok, error: note || "" });
   invoke("pool_mark_verified", { email: info.email, ok, note: note || null }).catch(() => {});
   mboxLoad().then(rerender);
-  setTimeout(pump, 400);
+  setTimeout(() => pump(b), 400);
   return true;
 }
 
@@ -487,15 +504,15 @@ export function mboxStop() {
   const b = M.batch;
   if (!b.running) return;
   b.running = false;
+  const flows = [...b.active.keys()];
   b.active.clear();
   b.queue.length = 0;
-  invoke("reg_close_window", {}).catch(() => {});
+  for (const flow of flows) invoke("reg_close_window", { flow }).catch(() => {});
   toast(t("mb.batch.stopped"), "warn");
   rerender();
 }
 
-function finishBatch() {
-  const b = M.batch;
+function finishBatch(b) {
   const ok = b.results.filter((r) => r.ok).length;
   b.running = false;
   M.lastRun = { total: b.total, results: b.results.slice() };

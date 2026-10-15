@@ -51,3 +51,7 @@ jobs:
       - name: 原生 WebView2 授权回调冒烟测试（仅本地测试页）
         timeout-minutes: 5
         run: ./scripts/test-rust-windows.ps1 -Smoke
+
+      - name: 原生 WebView2 窗口布局回归（仅空白窗口）
+        timeout-minutes: 5
+        run: ./scripts/test-rust-windows.ps1 -LayoutSmoke

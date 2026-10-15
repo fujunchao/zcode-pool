@@ -1,6 +1,6 @@
 # 仅供 Windows CI：Rust 测试/示例没有主程序的资源清单，Tauri 原生控件需要显式启用 v6。
 # 不处理发布目录中的程序，只修改本次 Cargo 返回、位于仓库 target 内的测试产物。
-param([switch]$Smoke)
+param([switch]$Smoke, [switch]$LayoutSmoke)
 $ErrorActionPreference = 'Stop'
 $root = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $target = [System.IO.Path]::GetFullPath((Join-Path $root 'src-tauri\target')) + [System.IO.Path]::DirectorySeparatorChar
@@ -13,8 +13,9 @@ if (-not $mt) { throw '找不到 Windows SDK 的 mt.exe' }
 
 Push-Location $root
 try {
-    if ($Smoke) {
-        $output = & cargo build --locked --manifest-path src-tauri/Cargo.toml --example reg_driver_smoke --message-format=json
+    if ($Smoke -or $LayoutSmoke) {
+        $example = if ($LayoutSmoke) { 'reg_layout_smoke' } else { 'reg_driver_smoke' }
+        $output = & cargo build --locked --manifest-path src-tauri/Cargo.toml --example $example --message-format=json
     } else {
         $output = & cargo test --locked --manifest-path src-tauri/Cargo.toml --no-run --message-format=json
     }
@@ -30,7 +31,7 @@ try {
     $artifacts = @($records | ForEach-Object {
         $v = $_
         if ($v.reason -ne 'compiler-artifact' -or -not $v.executable) { return }
-        if (($Smoke -and $v.target.name -eq 'reg_driver_smoke') -or (-not $Smoke -and $v.profile.test)) {
+        if ((($Smoke -or $LayoutSmoke) -and $v.target.name -eq $example) -or (-not ($Smoke -or $LayoutSmoke) -and $v.profile.test)) {
             $v.executable
         }
     } | Sort-Object -Unique)
@@ -47,7 +48,7 @@ try {
         & $path
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
-    if (-not $Smoke) {
+    if (-not ($Smoke -or $LayoutSmoke)) {
         & cargo test --locked --manifest-path src-tauri/Cargo.toml --doc
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
