@@ -54,6 +54,22 @@ fn bounds(window: &WebviewWindow) -> SmokeResult<(i32, i32, u32, u32)> {
     })
 }
 
+fn content_size(window: &WebviewWindow) -> SmokeResult<tauri::PhysicalSize<u32>> {
+    inspect(window, |window| {
+        #[cfg(target_os = "linux")]
+        {
+            use gtk::prelude::*;
+            let native = window.gtk_window()?;
+            let (width, height) = native.size();
+            // Tao 的 inner_size 在 CSD 下包含阴影/标题栏，不能用它断言客户区统一。
+            return Ok(LogicalSize::new(width as u32, height as u32)
+                .to_physical(native.scale_factor() as f64));
+        }
+        #[cfg(not(target_os = "linux"))]
+        Ok(window.inner_size()?)
+    })
+}
+
 fn assert_visible(window: &WebviewWindow, positioned: bool) -> SmokeResult<()> {
     inspect(window, move |window| {
         let monitor = window.current_monitor()?.ok_or("窗口没有所在显示器")?;
@@ -214,9 +230,10 @@ async fn smoke(app: &AppHandle) -> SmokeResult<()> {
     if replacement.is_maximized()? {
         return Err("整理没有恢复最大化窗口".into());
     }
-    let one = windows[1].inner_size()?;
-    let two = replacement.inner_size()?;
-    if one != two {
+    let one = content_size(&windows[1])?;
+    let two = content_size(&replacement)?;
+    // 与原生就绪判定一致：允许逻辑尺寸转换和主题取整带来的 1 个物理像素差异。
+    if one.width.abs_diff(two.width) > 1 || one.height.abs_diff(two.height) > 1 {
         return Err(format!("整理未统一内容尺寸：{one:?} / {two:?}").into());
     }
     for n in 5..8 {
