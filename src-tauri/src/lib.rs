@@ -2335,6 +2335,19 @@ mod tests {
     }
 
     #[test]
+    fn five_login_windows_stay_inside_1080p_work_area() {
+        let layout = LoginLayout {
+            x0: 10, y0: 10, ow: 500, oh: 734, gap: 10,
+            cols: grid_cols(5, 1900, 1018, 500, 734, 10),
+        };
+        for slot in 0..5 {
+            let (x, y) = slot_xy(&layout, slot);
+            assert!(x >= 0 && y >= 0 && x + layout.ow <= 1920 && y + layout.oh <= 1040,
+                "槽位 {slot} 越出工作区：({x}, {y})，尺寸 {}×{}", layout.ow, layout.oh);
+        }
+    }
+
+    #[test]
     fn slot_xy_places_grid_row_major() {
         let l = t_layout(3);
         assert_eq!(slot_xy(&l, 0), (100, 50));
