@@ -80,8 +80,7 @@ fn decoration(windows: &[WebviewWindow]) -> Size {
         if w.is_minimized().unwrap_or(true) || w.is_maximized().unwrap_or(true) {
             continue;
         }
-        if let (Ok(outer), Ok(inner), Ok(scale)) =
-            (w.outer_size(), w.inner_size(), w.scale_factor())
+        if let (Ok(outer), Ok(inner), Ok(scale)) = (w.outer_size(), inner_size(w), w.scale_factor())
         {
             if scale.is_finite() && scale > 0.0 {
                 result.width = result
@@ -94,6 +93,22 @@ fn decoration(windows: &[WebviewWindow]) -> Size {
         }
     }
     result
+}
+
+fn inner_size(window: &WebviewWindow) -> Result<PhysicalSize<u32>, String> {
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::prelude::*;
+        let native = window.gtk_window().map_err(layout_error)?;
+        // Tao 的 configure-event 尺寸在 GTK 客户端装饰下包含阴影/标题栏，
+        // 不能与 GtkWindow::resize 的客户区尺寸比较；get_size 与 setter 语义一致。
+        let (width, height) = native.size();
+        return Ok(
+            LogicalSize::new(width as u32, height as u32).to_physical(native.scale_factor() as f64)
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    window.inner_size().map_err(layout_error)
 }
 
 async fn on_main_thread<T: Send + 'static>(
@@ -178,7 +193,7 @@ async fn wait_geometry(
             if !scale.is_finite() || scale <= 0.0 {
                 return Err(layout_error("invalid native window scale"));
             }
-            let inner = window.inner_size().map_err(layout_error)?;
+            let inner = inner_size(window)?;
             if let Some(size) = size {
                 let expected = size.to_physical::<u32>(scale);
                 if inner.width.abs_diff(expected.width) > 1

@@ -77,7 +77,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xvfb openbox weston dbus-x11
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xvfb openbox weston dbus-x11 gdb
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -105,12 +105,13 @@ jobs:
         timeout-minutes: 5
         env:
           GDK_BACKEND: x11
+          GDK_SYNCHRONIZE: '1'
           WEBKIT_DISABLE_DMABUF_RENDERER: '1'
         run: |
           xvfb-run -a -s '-screen 0 1280x800x24' dbus-run-session -- sh -ec '
             openbox &
             sleep 1
-            exec src-tauri/target/debug/examples/reg_layout_smoke
+            exec gdb --batch --return-child-result -ex run -ex "thread apply all bt 10" --args src-tauri/target/debug/examples/reg_layout_smoke
           '
 
       - name: Linux Wayland 不支持全局坐标时仍能开窗和整理

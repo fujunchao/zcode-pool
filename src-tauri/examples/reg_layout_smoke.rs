@@ -62,6 +62,7 @@ fn assert_visible(window: &WebviewWindow, positioned: bool) -> SmokeResult<()> {
 }
 
 async fn open(app: &AppHandle, label: &str) -> SmokeResult<WebviewWindow> {
+    println!("创建本地测试窗口：{label}");
     let permit = login_windows::reserve(label, 5)?;
     let profile = std::env::temp_dir().join(format!("zpool-layout-smoke-{}", uuid::Uuid::new_v4()));
     let window = tauri::WebviewWindowBuilder::new(
@@ -82,6 +83,7 @@ async fn open(app: &AppHandle, label: &str) -> SmokeResult<WebviewWindow> {
         }
     });
     login_windows::place(app, label, false).await?;
+    println!("落位完成：{label} {:?}", bounds(&window)?);
     Ok(window)
 }
 
@@ -112,6 +114,7 @@ async fn smoke(app: &AppHandle) -> SmokeResult<()> {
         assert_visible(window, positioned)?;
     }
     let before: Vec<_> = windows.iter().map(bounds).collect::<SmokeResult<_>>()?;
+    let before_area = windows[0].current_monitor()?.map(|m| m.work_area().clone());
     if positioned {
         windows[1].set_focus()?;
         wait_until("旧窗口获得焦点", || {
@@ -132,7 +135,15 @@ async fn smoke(app: &AppHandle) -> SmokeResult<()> {
         !positioned || (windows[1].is_focused()? && lost_focus.load(Ordering::SeqCst) == 0);
     println!("补位全程不抢旧窗口焦点：{retained_focus}");
     if positioned && bounds(&replacement)? != before[0] {
-        return Err("补位没有复用原槽位".into());
+        return Err(format!(
+            "补位没有复用原槽位：原={:?} 新={:?} 工作区原={before_area:?} 新={:?}",
+            before[0],
+            bounds(&replacement)?,
+            replacement
+                .current_monitor()?
+                .map(|m| m.work_area().clone())
+        )
+        .into());
     }
     for n in 1..5 {
         if positioned && bounds(&windows[n])? != before[n] {
