@@ -161,11 +161,17 @@ async fn smoke(app: &AppHandle) -> SmokeResult<()> {
         }
     });
     close(app, &windows[0])?;
+    let focused_after_close = windows[1].is_focused()?;
+    let losses_after_close = lost_focus.load(Ordering::SeqCst);
     let replacement = open(app, "login-layout-replacement").await?;
     std::thread::sleep(Duration::from_millis(150));
     let retained_focus =
         !positioned || (windows[1].is_focused()? && lost_focus.load(Ordering::SeqCst) == 0);
     println!("补位全程不抢旧窗口焦点：{retained_focus}");
+    if !retained_focus {
+        eprintln!("焦点诊断：关旧窗后 focused={focused_after_close} losses={losses_after_close}；新窗显示后 old_focused={} new_focused={} losses={}",
+            windows[1].is_focused()?, replacement.is_focused()?, lost_focus.load(Ordering::SeqCst));
+    }
     let after = bounds(&replacement)?;
     if positioned && (after.0, after.1) != (before[0].0, before[0].1) {
         return Err(format!(

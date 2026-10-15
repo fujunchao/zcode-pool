@@ -284,6 +284,13 @@ async fn apply(app: &AppHandle, label: &str, placement: Placement) -> Result<(),
         window.set_size(size).map_err(layout_error)?;
         #[cfg(target_os = "linux")]
         if !window.is_visible().map_err(layout_error)? {
+            use gtk::prelude::*;
+            // accept_focus 在 GTK 首帧绘制后会恢复，不能单独阻止窗口管理器激活新窗。
+            // 明确关闭 focus_on_map；手动开窗仍由 present 的 set_focus 显式激活。
+            window
+                .gtk_window()
+                .map_err(layout_error)?
+                .set_focus_on_map(false);
             window.set_focusable(false).map_err(layout_error)?;
             window.show().map_err(layout_error)?;
         }

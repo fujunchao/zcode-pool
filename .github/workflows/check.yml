@@ -110,7 +110,10 @@ jobs:
           xvfb-run -a -s '-screen 0 1280x800x24' dbus-run-session -- sh -ec '
             openbox &
             sleep 1
-            exec src-tauri/target/debug/examples/reg_layout_smoke
+            for attempt in 1 2 3 4 5 6 7 8; do
+              echo "X11 原生布局与焦点回归：第 $attempt 轮"
+              src-tauri/target/debug/examples/reg_layout_smoke
+            done
           '
 
       - name: Linux Wayland 不支持全局坐标时仍能开窗和整理
