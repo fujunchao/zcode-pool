@@ -13,7 +13,7 @@ jobs:
       contents: write
     env:
       # 手动派发（非 tag）时兜底用的发布标签 —— **发版时只改这一处**：tagName 与便携版附件上传都读它
-      RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.2.11' }}
+      RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.2.12' }}
     strategy:
       fail-fast: false
       matrix:
@@ -54,22 +54,21 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ env.RELEASE_TAG }}
-          releaseName: 'Z·POOL ${{ github.ref_name }}'
+          releaseName: 'Z·POOL ${{ env.RELEASE_TAG }}'
           releaseBody: |
             本版改进
 
-            - **修复并发注册（三开及以上）时窗口位置被反复重排的问题**：此前每次新窗口
-              打开都会按「当时的窗口数」把全部登录窗口重新排布 —— 关掉一个已完成的窗口后，
-              新窗口出现会把仍在注册（可能正在过验证码）的窗口一起挪走，操作直接被打断。
-              现改为**固定槽位**方案：窗口落位后其位置在整个生命周期内保持不变；新窗口
-              出现时**优先占用已关闭窗口腾出的位置**，且绝不移动其它窗口。
-            - 布局在首个窗口落位时按当前「注册并发数」一次排定（网格列数 / 间距 / 居中
-              策略不变），同组窗口的最终排布效果与之前一致；全部窗口关闭后才重新排定，
-              自动适配显示器分辨率或并发设置变化。
-            - 「整理窗口」按钮保留原语义：仅在你主动点击时才整组重排归位，并同步后续
-              新窗口的落位布局。
+            - **修复注册后可能停留在「授权成功，正在跳转到应用」的问题**：登录驱动改用
+              不触发页面导航的 IPC 通道上报状态，不再与真正的 OAuth 回调争用主窗口导航。
+            - **纠正进度状态**：点击授权后显示「等待授权回调」，只有后台真正保存账号后
+              才显示「入库完成」；迟到的网页消息不会覆盖已完成或失败的状态。
+            - **最小权限与诊断**：登录网页只能上报自己的注册流程；补充 WebView2 导航
+              失败码及轮询重试/恢复日志，授权码、验证链接参数和短信验证码不再写入相关日志。
+            - 新增快速/慢速回调、IPC 异常、并发流程、宿主权限及原生 WebView2 本地回调
+              回归测试。编译、测试与多平台安装包统一由 GitHub Actions 完成。
+            - 保持人工滑块验证、固定窗口槽位、深链接/轮询双通道与原有超时策略不变。
 
-            下载：Windows `*_x64-setup.exe` · macOS `*_universal.dmg` · Linux `*.deb` / `*.AppImage`
+            下载：Windows `*_x64-setup.exe` / `*_portable.exe` · macOS `*_universal.dmg` · Linux `*.deb` / `*.AppImage`
 
             程序未签名，首次运行系统可能提示来源未知。
           releaseDraft: true
