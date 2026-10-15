@@ -1970,6 +1970,11 @@ async fn relay_external(on: bool) -> Result<Value, String> {
     relay().set_external_and_run(&Paths::detect(), on)
 }
 
+// 同一 crate 只展开一次上下文宏，避免 macOS 测试重复嵌入 Info.plist 符号。
+pub(crate) fn app_context<R: tauri::Runtime>() -> tauri::Context<R> {
+    tauri::generate_context!()
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(driver::plugin())
@@ -2104,6 +2109,6 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .run(app_context())
         .expect("error while running tauri application");
 }

@@ -255,7 +255,7 @@ mod tests {
         let app = tauri::test::mock_builder()
             .plugin(plugin())
             .invoke_handler(tauri::generate_handler![privileged_probe])
-            .build(tauri::generate_context!())
+            .build(crate::app_context())
             .unwrap();
         let flow = uuid::Uuid::new_v4().to_string();
         let label = crate::login_label(&flow);
@@ -285,6 +285,7 @@ mod tests {
         }
         assert!(tauri::test::get_ipc_response(&main, request("plugin:reg-driver|report", "https://chat.z.ai/auth")).is_err());
         assert!(tauri::test::get_ipc_response(&login, request("privileged_probe", "https://chat.z.ai/auth")).is_err());
-        assert!(tauri::test::get_ipc_response(&main, request("privileged_probe", "http://tauri.localhost")).is_ok(), "不能破坏主窗口现有命令权限");
+        let local_origin = if cfg!(windows) { "http://tauri.localhost" } else { "tauri://localhost" };
+        assert!(tauri::test::get_ipc_response(&main, request("privileged_probe", local_origin)).is_ok(), "不能破坏主窗口现有命令权限");
     }
 }
