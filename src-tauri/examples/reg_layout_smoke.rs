@@ -96,9 +96,9 @@ fn assert_visible(window: &WebviewWindow, positioned: bool) -> SmokeResult<()> {
     })
 }
 
-async fn open(app: &AppHandle, label: &str) -> SmokeResult<WebviewWindow> {
+async fn open(app: &AppHandle, label: &str, capacity: usize) -> SmokeResult<WebviewWindow> {
     println!("创建本地测试窗口：{label}");
-    let permit = login_windows::reserve(label, 5)?;
+    let permit = login_windows::reserve(label, capacity)?;
     let profile = std::env::temp_dir().join(format!("zpool-layout-smoke-{}", uuid::Uuid::new_v4()));
     let window = tauri::WebviewWindowBuilder::new(
         app,
@@ -137,7 +137,7 @@ fn close(app: &AppHandle, window: &WebviewWindow) -> SmokeResult<()> {
 
 async fn smoke(app: &AppHandle) -> SmokeResult<()> {
     // 产品已有主窗口；稳定应用激活和标题栏状态后再测批量无焦点显示。
-    let _main = tauri::WebviewWindowBuilder::new(
+    let main = tauri::WebviewWindowBuilder::new(
         app,
         "main",
         tauri::WebviewUrl::External("about:blank".parse()?),
@@ -146,9 +146,13 @@ async fn smoke(app: &AppHandle) -> SmokeResult<()> {
     .focused(true)
     .build()?;
     std::thread::sleep(Duration::from_millis(250));
+    #[cfg(windows)]
+    focused_close_smoke(app, &main).await?;
+    #[cfg(not(windows))]
+    let _ = main;
     let mut windows = Vec::new();
     for n in 0..5 {
-        windows.push(open(app, &format!("login-layout-{n}")).await?);
+        windows.push(open(app, &format!("login-layout-{n}"), 5).await?);
     }
     let positioned = login_windows::supports_position(app, windows[0].label()).await?;
     if std::env::var_os("ZPOOL_SMOKE_WAYLAND").is_some() && positioned {
@@ -179,7 +183,7 @@ async fn smoke(app: &AppHandle) -> SmokeResult<()> {
     close(app, &windows[0])?;
     let focused_after_close = windows[1].is_focused()?;
     let losses_after_close = lost_focus.load(Ordering::SeqCst);
-    let replacement = open(app, "login-layout-replacement").await?;
+    let replacement = open(app, "login-layout-replacement", 5).await?;
     std::thread::sleep(Duration::from_millis(150));
     let retained_focus =
         !positioned || (windows[1].is_focused()? && lost_focus.load(Ordering::SeqCst) == 0);
@@ -237,7 +241,7 @@ async fn smoke(app: &AppHandle) -> SmokeResult<()> {
         return Err(format!("整理未统一内容尺寸：{one:?} / {two:?}").into());
     }
     for n in 5..8 {
-        let window = open(app, &format!("login-layout-{n}")).await?;
+        let window = open(app, &format!("login-layout-{n}"), 5).await?;
         std::thread::sleep(Duration::from_millis(100));
         assert_visible(&window, positioned)?;
     }
@@ -245,6 +249,70 @@ async fn smoke(app: &AppHandle) -> SmokeResult<()> {
         return Err("补位抢走了旧窗口的焦点".into());
     }
     println!("调整大小/最大化后整理，以及后续三次补位：通过");
+    Ok(())
+}
+
+#[cfg(windows)]
+async fn focused_close_smoke(app: &AppHandle, main: &WebviewWindow) -> SmokeResult<()> {
+    let main_activations = Arc::new(AtomicUsize::new(0));
+    let activations = main_activations.clone();
+    main.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Focused(true)) {
+            activations.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    for round in 0..3 {
+        main.set_focus()?;
+        wait_until("主窗口初始焦点", || {
+            main.is_focused().unwrap_or(false)
+        })?;
+        let mut old = Vec::new();
+        for n in 0..3 {
+            let window = open(app, &format!("login-focus-{round}-old-{n}"), 3).await?;
+            window.set_focus()?;
+            wait_until("旧登录窗口焦点", || {
+                window.is_focused().unwrap_or(false)
+            })?;
+            old.push(window);
+        }
+        // 与现场一致：旧窗逐个完成，中间的新补位窗只显示、从未被激活。
+        close(app, &old[1])?;
+        let next = open(app, &format!("login-focus-{round}-next"), 3).await?;
+        close(app, &old[0])?;
+        if !old[2].is_focused()? || next.is_focused()? {
+            return Err("焦点关闭回归的初始状态不成立".into());
+        }
+        let next_before = bounds(&next)?;
+        std::thread::sleep(Duration::from_millis(100));
+        main_activations.store(0, Ordering::SeqCst);
+        close(app, &old[2])?;
+        wait_until("焦点交给从未激活的补位窗", || {
+            next.is_focused().unwrap_or(false)
+        })?;
+        std::thread::sleep(Duration::from_millis(100));
+        if main_activations.load(Ordering::SeqCst) != 0 || main.is_focused()? {
+            return Err("关闭当前注册窗时主界面曾抢到前台".into());
+        }
+        if bounds(&next)? != next_before {
+            return Err("焦点交接移动或缩放了补位窗".into());
+        }
+        println!(
+            "第 {} 轮：关闭当前焦点窗，主界面未抢前台且补位窗接到焦点：通过",
+            round + 1
+        );
+
+        // 用户主动回到主界面后，关掉后台注册窗不能再把焦点抢回来。
+        let background = open(app, &format!("login-focus-{round}-background"), 3).await?;
+        main.set_focus()?;
+        wait_until("用户主动切回主窗口", || {
+            main.is_focused().unwrap_or(false)
+        })?;
+        close(app, &next)?;
+        if !main.is_focused()? || background.is_focused()? {
+            return Err("关闭后台注册窗干扰了用户选择的焦点".into());
+        }
+        close(app, &background)?;
+    }
     Ok(())
 }
 
