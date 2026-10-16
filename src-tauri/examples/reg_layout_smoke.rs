@@ -106,7 +106,7 @@ async fn open(app: &AppHandle, label: &str) -> SmokeResult<WebviewWindow> {
         tauri::WebviewUrl::External("about:blank".parse()?),
     )
     .inner_size(login_windows::WIDTH, login_windows::HEIGHT)
-    .min_inner_size(420.0, 560.0)
+    .min_inner_size(login_windows::MIN_WIDTH, login_windows::MIN_HEIGHT)
     .visible(false)
     .focused(false)
     .resizable(true)

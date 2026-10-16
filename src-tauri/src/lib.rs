@@ -612,7 +612,7 @@ async fn oauth_begin(
     .title(login_title(email.as_deref()))
     .theme(Some(tauri::Theme::Dark))
     .inner_size(login_windows::WIDTH, login_windows::HEIGHT)
-    .min_inner_size(420.0, 560.0)
+    .min_inner_size(login_windows::MIN_WIDTH, login_windows::MIN_HEIGHT)
     .resizable(true)
     .visible(false)
     .focused(!auto)

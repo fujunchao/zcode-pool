@@ -13,6 +13,8 @@ use tauri::{AppHandle, LogicalSize, Manager, PhysicalPosition, PhysicalSize, Web
 pub(crate) use layout::Permit;
 pub(crate) const WIDTH: f64 = layout::DEFAULT_WIDTH;
 pub(crate) const HEIGHT: f64 = layout::DEFAULT_HEIGHT;
+pub(crate) const MIN_WIDTH: f64 = layout::MIN_WIDTH;
+pub(crate) const MIN_HEIGHT: f64 = layout::MIN_HEIGHT;
 
 fn registry() -> &'static Registry {
     static REGISTRY: OnceLock<Registry> = OnceLock::new();
@@ -374,8 +376,8 @@ async fn apply(app: &AppHandle, label: &str, placement: Placement) -> Result<(),
     with_window(app, label, move |window| {
         window
             .set_min_size(Some(LogicalSize::new(
-                420.0_f64.min(geometry.inner.width as f64 / geometry.scale),
-                560.0_f64.min(geometry.inner.height as f64 / geometry.scale),
+                MIN_WIDTH.min(geometry.inner.width as f64 / geometry.scale),
+                MIN_HEIGHT.min(geometry.inner.height as f64 / geometry.scale),
             )))
             .map_err(layout_error)?;
         #[cfg(target_os = "linux")]
@@ -389,8 +391,10 @@ async fn apply(app: &AppHandle, label: &str, placement: Placement) -> Result<(),
         label.trim_start_matches("login-"),
         "layout",
         &format!(
-            "slot={} requested_pos=({x},{y}) positioned={positioned} outer={}x{} layered={}",
+            "slot={} requested_pos=({x},{y}) positioned={positioned} outer={}x{} layered={} planned_outer={}x{} work_area=({},{},{}x{}) scale={}",
             placement.slot, geometry.outer.width, geometry.outer.height, placement.layered,
+            placement.outer.width, placement.outer.height, area.x, area.y, area.width, area.height,
+            placement.scale,
         ),
     );
     Ok(())

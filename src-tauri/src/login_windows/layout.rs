@@ -7,6 +7,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 pub(super) const MAX_WINDOWS: usize = 5;
 pub(super) const DEFAULT_WIDTH: f64 = 480.0;
 pub(super) const DEFAULT_HEIGHT: f64 = 680.0;
+pub(super) const MIN_WIDTH: f64 = 420.0;
+pub(super) const MIN_HEIGHT: f64 = 560.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Rect {
@@ -55,6 +57,41 @@ struct Layout {
     layered: bool,
 }
 
+// 先保留窗口宽度，再保留间距；同等条件下优先更多列，保持原有正常布局。
+// 仅收窄客户区，不为容纳额外行压缩高度，避免验证码区域过矮。
+fn fit_tiled_grid(
+    area: Rect,
+    capacity: usize,
+    width: i32,
+    height: i32,
+    min_width: i32,
+    gap: i32,
+    min_gap: i32,
+) -> Option<(i32, i32, usize)> {
+    (1..=capacity)
+        .filter_map(|cols| {
+            let rows = capacity.div_ceil(cols) as i64;
+            let columns = cols as i64;
+            let vertical_gap = (area.height as i64 - rows * height as i64) / (rows + 1);
+            let max_gap = (gap as i64).min(vertical_gap);
+            if max_gap < min_gap as i64 {
+                return None;
+            }
+            let full_width_gap =
+                ((area.width as i64 - columns * width as i64) / (columns + 1)).min(max_gap);
+            if full_width_gap >= min_gap as i64 {
+                return Some((width, full_width_gap as i32, cols));
+            }
+            let fitted_width = (area.width as i64 - (columns + 1) * min_gap as i64) / columns;
+            (fitted_width >= min_width as i64).then_some((
+                fitted_width.min(width as i64) as i32,
+                min_gap,
+                cols,
+            ))
+        })
+        .max()
+}
+
 impl Layout {
     fn new(display: &Display, capacity: usize, decoration: Size) -> Result<Self, &'static str> {
         let area = display.area;
@@ -75,10 +112,30 @@ impl Layout {
         let capacity = capacity.clamp(1, MAX_WINDOWS);
         let gap = ((10.0 * scale).round() as i32).clamp(1, area.width.min(area.height) / 4);
         let (aw, ah) = (area.width - 2 * gap, area.height - 2 * gap);
-        let width = (((DEFAULT_WIDTH + decoration.width) * scale).ceil() as i32).clamp(1, aw);
+        let preferred_width = ((DEFAULT_WIDTH + decoration.width) * scale).ceil() as i32;
+        let width = preferred_width.clamp(1, aw);
         let mut height =
             (((DEFAULT_HEIGHT + decoration.height) * scale).ceil() as i32).clamp(1, ah);
-        let cols = (((aw + gap) / (width + gap)) as usize).clamp(1, capacity);
+        let min_gap = ((6.0 * scale).round() as i32).clamp(1, gap);
+        let min_width = ((MIN_WIDTH + decoration.width) * scale).ceil() as i32;
+        let (width, gap, cols) = fit_tiled_grid(
+            area,
+            capacity,
+            preferred_width,
+            height,
+            min_width,
+            gap,
+            min_gap,
+        )
+        .unwrap_or_else(|| {
+            // 可读平铺方案全部失败后，才沿用原有屏内层叠布局。
+            (
+                width,
+                gap,
+                (((aw + gap) / (width + gap)) as usize).clamp(1, capacity),
+            )
+        });
+        let (aw, ah) = (area.width - 2 * gap, area.height - 2 * gap);
         let rows_needed = capacity.div_ceil(cols);
         let rows_fit = (((ah + gap) / (height + gap)) as usize).max(1);
         let rows = rows_needed.min(rows_fit);
@@ -308,6 +365,183 @@ mod tests {
         registry
             .place(label, &[screen.clone()], screen, DECORATION)
             .unwrap()
+    }
+
+    fn placements(screen: &Display, count: usize) -> Vec<Placement> {
+        let registry = Registry::default();
+        let mut permits = Vec::new();
+        (0..count)
+            .map(|n| {
+                let label = n.to_string();
+                permits.push(registry.reserve(&label, count).unwrap());
+                place(&registry, &label, screen)
+            })
+            .collect()
+    }
+
+    fn assert_tiled(screen: &Display, placements: &[Placement]) {
+        for (index, placement) in placements.iter().enumerate() {
+            assert!(
+                inside(screen.area, placement.outer),
+                "窗口越界：{placement:?}"
+            );
+            for other in &placements[index + 1..] {
+                let (a, b) = (placement.outer, other.outer);
+                assert!(
+                    a.x + a.width <= b.x
+                        || b.x + b.width <= a.x
+                        || a.y + a.height <= b.y
+                        || b.y + b.height <= a.y,
+                    "可平铺的窗口发生遮挡：{a:?} / {b:?}，工作区={screen:?}"
+                );
+            }
+            assert!(!placement.layered, "能够平铺时不应启用层叠：{placement:?}");
+        }
+    }
+
+    #[test]
+    fn three_windows_on_1080p_at_125_percent_do_not_overlap() {
+        let screen = display(1920, 1030, 1.25);
+        let windows = placements(&screen, 3);
+        assert_tiled(&screen, &windows);
+        // 只收紧间距就能容纳三列，不应先缩小客户区。
+        assert!(windows.iter().all(|p| p.inner.width == DEFAULT_WIDTH));
+        assert!(windows.iter().all(|p| p.outer.y == windows[0].outer.y));
+        assert_eq!(
+            windows.iter().map(|p| p.outer.x).collect::<Vec<_>>(),
+            vec![11, 647, 1283]
+        );
+    }
+
+    #[test]
+    fn two_windows_keep_the_existing_default_layout() {
+        let screen = display(1920, 1030, 1.25);
+        let windows = placements(&screen, 2);
+        assert_tiled(&screen, &windows);
+        assert_eq!(
+            windows[0].outer,
+            Rect {
+                x: 328,
+                y: 56,
+                width: 625,
+                height: 918
+            }
+        );
+        assert_eq!(
+            windows[1].outer,
+            Rect {
+                x: 966,
+                y: 56,
+                width: 625,
+                height: 918
+            }
+        );
+    }
+
+    #[test]
+    fn three_windows_narrow_before_layering_on_a_small_screen() {
+        let screen = display(1366, 720, 1.0);
+        let windows = placements(&screen, 3);
+        assert_tiled(&screen, &windows);
+        assert!(windows
+            .iter()
+            .all(|p| (420.0..DEFAULT_WIDTH).contains(&p.inner.width)));
+        assert!(windows.iter().all(|p| p.outer.y == windows[0].outer.y));
+    }
+
+    #[test]
+    fn two_rows_tighten_gaps_without_shrinking_window_height() {
+        let screen = display(1030, 1490, 1.0);
+        let windows = placements(&screen, 3);
+        assert_tiled(&screen, &windows);
+        assert!(windows
+            .iter()
+            .all(|p| p.inner.width == DEFAULT_WIDTH && p.inner.height == DEFAULT_HEIGHT));
+        assert!(windows[2].outer.y > windows[0].outer.y);
+    }
+
+    #[test]
+    fn minimum_width_boundary_includes_gaps_and_screen_margins() {
+        // 三扇最小客户区 420 + 边框 20，四处最小间距 6，共需 1344 像素。
+        let screen = display(1344, 720, 1.0);
+        let windows = placements(&screen, 3);
+        assert_tiled(&screen, &windows);
+        assert!(windows.iter().all(|p| p.inner.width >= 420.0));
+
+        let too_narrow = display(1343, 720, 1.0);
+        let layered = placements(&too_narrow, 3);
+        assert!(layered
+            .iter()
+            .all(|p| p.layered && inside(too_narrow.area, p.outer)));
+    }
+
+    #[test]
+    fn readable_grid_matrix_does_not_fall_back_to_layering() {
+        for (width, height) in [
+            (800, 560),
+            (1366, 720),
+            (1920, 1030),
+            (2560, 1400),
+            (3840, 2120),
+        ] {
+            for scale in [1.0_f64, 1.25, 1.5, 1.75, 2.0] {
+                for count in 1_usize..=5 {
+                    let mut screen = display(width, height, scale);
+                    screen.area.x = -width;
+                    screen.area.y = 40;
+                    let windows = placements(&screen, count);
+                    let gap = (6.0 * scale).round() as i32;
+                    let default_gap = (10.0 * scale).round() as i32;
+                    let min_width = ((420.0 + DECORATION.width) * scale).ceil() as i32;
+                    let outer_height = (((DEFAULT_HEIGHT + DECORATION.height) * scale).ceil()
+                        as i32)
+                        .min(height - 2 * default_gap);
+                    // 根据可读尺寸判断是否存在网格，不复制规划器的选优过程。
+                    let fits = (1..=count).any(|cols| {
+                        let rows = count.div_ceil(cols) as i32;
+                        let cols = cols as i32;
+                        cols * min_width + (cols + 1) * gap <= width
+                            && rows * outer_height + (rows + 1) * gap <= height
+                    });
+                    if fits {
+                        assert_tiled(&screen, &windows);
+                        assert!(windows.iter().all(|p| p.inner.width >= 420.0));
+                    } else {
+                        assert!(windows.iter().all(|p| inside(screen.area, p.outer)));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn adaptive_three_window_layout_survives_refill_and_arrange() {
+        let registry = Registry::default();
+        let screen = display(1920, 1030, 1.25);
+        let a = registry.reserve("a", 3).unwrap();
+        let _b = registry.reserve("b", 3).unwrap();
+        let _c = registry.reserve("c", 3).unwrap();
+        let before = [
+            place(&registry, "a", &screen),
+            place(&registry, "b", &screen),
+            place(&registry, "c", &screen),
+        ];
+        assert_tiled(&screen, &before);
+        a.release();
+        let _d = registry.reserve("d", 3).unwrap();
+        assert_eq!(place(&registry, "d", &screen).outer, before[0].outer);
+        assert_eq!(place(&registry, "b", &screen).outer, before[1].outer);
+        assert_eq!(place(&registry, "c", &screen).outer, before[2].outer);
+
+        let arranged = registry
+            .arrange(&["c".into(), "d".into(), "b".into()], &screen, DECORATION)
+            .unwrap();
+        let windows: Vec<_> = arranged.iter().map(|(_, p)| *p).collect();
+        assert_tiled(&screen, &windows);
+        assert_eq!(
+            windows.iter().map(|p| p.outer).collect::<Vec<_>>(),
+            before.iter().map(|p| p.outer).collect::<Vec<_>>()
+        );
     }
 
     #[test]
