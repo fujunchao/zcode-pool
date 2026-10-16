@@ -143,6 +143,7 @@ async fn smoke(app: &AppHandle) -> SmokeResult<()> {
         tauri::WebviewUrl::External("about:blank".parse()?),
     )
     .inner_size(300.0, 200.0)
+    .visible(true)
     .focused(true)
     .build()?;
     std::thread::sleep(Duration::from_millis(250));
@@ -253,44 +254,104 @@ async fn smoke(app: &AppHandle) -> SmokeResult<()> {
 }
 
 #[cfg(windows)]
-async fn focused_close_smoke(app: &AppHandle, main: &WebviewWindow) -> SmokeResult<()> {
-    let main_activations = Arc::new(AtomicUsize::new(0));
-    let activations = main_activations.clone();
-    main.on_window_event(move |event| {
-        if matches!(event, tauri::WindowEvent::Focused(true)) {
-            activations.fetch_add(1, Ordering::SeqCst);
-        }
-    });
-    for round in 0..3 {
-        main.set_focus()?;
-        wait_until("主窗口初始焦点", || {
-            main.is_focused().unwrap_or(false)
+fn is_foreground(window: &WebviewWindow) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    window
+        .hwnd()
+        .is_ok_and(|handle| unsafe { GetForegroundWindow() == handle.0 as isize })
+}
+
+#[cfg(windows)]
+static WATCHED_MAIN: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+#[cfg(windows)]
+static MAIN_ACTIVATIONS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(windows)]
+unsafe extern "system" fn foreground_event(
+    _hook: isize,
+    _event: u32,
+    window: isize,
+    _object: i32,
+    _child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    if window == WATCHED_MAIN.load(Ordering::SeqCst) {
+        MAIN_ACTIVATIONS.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[cfg(windows)]
+struct ForegroundWatch {
+    main: WebviewWindow,
+    hook: isize,
+}
+
+#[cfg(windows)]
+impl ForegroundWatch {
+    fn new(main: &WebviewWindow) -> SmokeResult<Self> {
+        let hook = inspect(main, |window| {
+            use windows_sys::Win32::UI::Accessibility::SetWinEventHook;
+            WATCHED_MAIN.store(window.hwnd()?.0 as isize, Ordering::SeqCst);
+            // 与现场记录相同：观察系统前台事件，不把 Tao 的缓存状态当作实时焦点。
+            let hook = unsafe {
+                SetWinEventHook(3, 3, 0, Some(foreground_event), std::process::id(), 0, 0)
+            };
+            if hook == 0 {
+                return Err("无法订阅系统前台事件".into());
+            }
+            Ok(hook)
         })?;
+        Ok(Self {
+            main: main.clone(),
+            hook,
+        })
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ForegroundWatch {
+    fn drop(&mut self) {
+        let hook = self.hook;
+        let _ = inspect(&self.main, move |_| {
+            unsafe {
+                windows_sys::Win32::UI::Accessibility::UnhookWinEvent(hook);
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(windows)]
+async fn focused_close_smoke(app: &AppHandle, main: &WebviewWindow) -> SmokeResult<()> {
+    let _watch = ForegroundWatch::new(main)?;
+    for round in 0..3 {
+        main.show()?;
+        main.set_focus()?;
+        wait_until("主窗口初始焦点", || is_foreground(main))?;
         let mut old = Vec::new();
         for n in 0..3 {
             let window = open(app, &format!("login-focus-{round}-old-{n}"), 3).await?;
             window.set_focus()?;
-            wait_until("旧登录窗口焦点", || {
-                window.is_focused().unwrap_or(false)
-            })?;
+            wait_until("旧登录窗口焦点", || is_foreground(&window))?;
             old.push(window);
         }
         // 与现场一致：旧窗逐个完成，中间的新补位窗只显示、从未被激活。
         close(app, &old[1])?;
         let next = open(app, &format!("login-focus-{round}-next"), 3).await?;
         close(app, &old[0])?;
-        if !old[2].is_focused()? || next.is_focused()? {
+        if !is_foreground(&old[2]) || is_foreground(&next) {
             return Err("焦点关闭回归的初始状态不成立".into());
         }
         let next_before = bounds(&next)?;
         std::thread::sleep(Duration::from_millis(100));
-        main_activations.store(0, Ordering::SeqCst);
+        MAIN_ACTIVATIONS.store(0, Ordering::SeqCst);
         close(app, &old[2])?;
         wait_until("焦点交给从未激活的补位窗", || {
-            next.is_focused().unwrap_or(false)
+            is_foreground(&next)
         })?;
         std::thread::sleep(Duration::from_millis(100));
-        if main_activations.load(Ordering::SeqCst) != 0 || main.is_focused()? {
+        if MAIN_ACTIVATIONS.load(Ordering::SeqCst) != 0 || is_foreground(main) {
             return Err("关闭当前注册窗时主界面曾抢到前台".into());
         }
         if bounds(&next)? != next_before {
@@ -304,11 +365,9 @@ async fn focused_close_smoke(app: &AppHandle, main: &WebviewWindow) -> SmokeResu
         // 用户主动回到主界面后，关掉后台注册窗不能再把焦点抢回来。
         let background = open(app, &format!("login-focus-{round}-background"), 3).await?;
         main.set_focus()?;
-        wait_until("用户主动切回主窗口", || {
-            main.is_focused().unwrap_or(false)
-        })?;
+        wait_until("用户主动切回主窗口", || is_foreground(main))?;
         close(app, &next)?;
-        if !main.is_focused()? || background.is_focused()? {
+        if !is_foreground(main) || is_foreground(&background) {
             return Err("关闭后台注册窗干扰了用户选择的焦点".into());
         }
         close(app, &background)?;
