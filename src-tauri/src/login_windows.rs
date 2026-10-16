@@ -1,6 +1,9 @@
 //! 登录窗口管理：名额在初始化前预占，窗口操作统一调度到主线程。
 //! 状态锁内只有纯计算，不持锁等待原生窗口事件，避免关闭回调与布局互相等待。
 
+#[cfg(any(windows, test))]
+#[path = "login_windows/focus.rs"]
+mod focus;
 #[path = "login_windows/layout.rs"]
 mod layout;
 
@@ -34,6 +37,95 @@ pub(crate) fn reserve(label: &str, capacity: usize) -> Result<Permit, String> {
     registry()
         .reserve(label, capacity)
         .ok_or_else(|| i18n::tr("err.reg.too_many"))
+}
+
+/// 产品与原生回归共用的生命周期入口；关闭前交接焦点，销毁后才归还名额。
+pub(crate) fn track(window: &WebviewWindow, permit: Permit) {
+    #[cfg(windows)]
+    let (app, label) = (window.app_handle().clone(), window.label().to_string());
+    window.on_window_event(move |event| {
+        #[cfg(windows)]
+        if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+            if let Err(error) = handoff_before_close(&app, &label) {
+                flowlog::log(
+                    label.trim_start_matches("login-"),
+                    "focus-handoff-fail",
+                    &error,
+                );
+            }
+        }
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            permit.release();
+        }
+    });
+}
+
+#[cfg(windows)]
+fn handoff_before_close(app: &AppHandle, label: &str) -> Result<(), String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, IsIconic, IsWindow, IsWindowVisible, SetForegroundWindow,
+    };
+
+    struct WindowsFocus;
+    impl focus::Backend for WindowsFocus {
+        type Window = isize;
+
+        fn foreground(&mut self) -> Option<isize> {
+            // 读取系统即时前台，不依赖可能尚未更新的 Tao 焦点事件缓存。
+            let window = unsafe { GetForegroundWindow() };
+            (window != 0).then_some(window)
+        }
+
+        fn available(&mut self, window: isize) -> bool {
+            unsafe {
+                IsWindow(window) != 0 && IsWindowVisible(window) != 0 && IsIconic(window) == 0
+            }
+        }
+
+        fn activate(&mut self, window: isize) {
+            // 普通激活失败就交给策略收口；不用模拟 Alt 等强制抢前台手段。
+            unsafe {
+                SetForegroundWindow(window);
+            }
+        }
+    }
+
+    let Some(source) = app.get_webview_window(label) else {
+        return Ok(());
+    };
+    let source = source.hwnd().map_err(|e| e.to_string())?.0 as isize;
+    let candidates: Vec<_> = registry()
+        .focus_candidates(label)
+        .into_iter()
+        .filter_map(|label| {
+            let window = app.get_webview_window(&label)?;
+            let handle = window.hwnd().ok()?.0 as isize;
+            Some((label, handle))
+        })
+        .collect();
+    let outcome = focus::before_close(
+        &mut WindowsFocus,
+        source,
+        candidates.iter().map(|(_, handle)| *handle),
+    );
+    let detail = match outcome {
+        focus::Handoff::NotForeground => "result=not-foreground".into(),
+        focus::Handoff::NoCandidate => "result=no-candidate".into(),
+        focus::Handoff::Interrupted => "result=interrupted".into(),
+        focus::Handoff::Rejected => "result=rejected".into(),
+        focus::Handoff::Transferred(handle) => {
+            let target = candidates.iter().find(|(_, h)| *h == handle).unwrap();
+            let target: String = target
+                .0
+                .trim_start_matches("login-")
+                .chars()
+                .take(8)
+                .collect();
+            format!("result=transferred target={target}")
+        }
+    };
+    flowlog::log(label.trim_start_matches("login-"), "focus-handoff", &detail);
+    Ok(())
 }
 
 fn display(monitor: &tauri::Monitor) -> Display {

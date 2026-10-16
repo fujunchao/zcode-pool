@@ -657,14 +657,12 @@ async fn oauth_begin(
         flowlog::log(&flow, "window-fail", &m);
         m
     })?;
+    login_windows::track(&window, permit);
     #[cfg(windows)]
     driver::observe_navigation(&window, &flow);
     let app_close = app.clone();
     let flow_evt2 = flow.clone();
     window.on_window_event(move |e| {
-        if matches!(e, tauri::WindowEvent::Destroyed) {
-            permit.release();
-        }
         if matches!(e, tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed) {
             if pending_remove(&flow_close) {
                 flowlog::log(&flow_close, "cancelled", "");

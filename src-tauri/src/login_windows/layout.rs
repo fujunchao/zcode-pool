@@ -239,6 +239,24 @@ impl Registry {
             .collect()
     }
 
+    pub fn focus_candidates(&self, closing: &str) -> Vec<String> {
+        let state = self.state();
+        let Some(Some(source_slot)) = state.members.get(closing) else {
+            return Vec::new();
+        };
+        let mut candidates: Vec<_> = state
+            .members
+            .iter()
+            .filter_map(|(label, slot)| {
+                let slot = (*slot)?;
+                (label != closing).then(|| (slot, label.clone()))
+            })
+            .collect();
+        // 从当前槽位往后寻找，末尾回到开头；不依赖随机流程标识的字典序。
+        candidates.sort_by_key(|(slot, _)| (*slot <= *source_slot, *slot));
+        candidates.into_iter().map(|(_, label)| label).collect()
+    }
+
     pub fn place(
         &self,
         label: &str,
@@ -542,6 +560,45 @@ mod tests {
             windows.iter().map(|p| p.outer).collect::<Vec<_>>(),
             before.iter().map(|p| p.outer).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn focus_candidates_follow_slots_and_exclude_inflight_members() {
+        let registry = Registry::default();
+        let screen = display(1920, 1030, 1.25);
+        let _a = registry.reserve("z-first", 3).unwrap();
+        let _b = registry.reserve("b-second", 3).unwrap();
+        let _c = registry.reserve("a-third", 3).unwrap();
+        let _pending = registry.reserve("pending", 4).unwrap();
+        for label in ["z-first", "b-second", "a-third"] {
+            place(&registry, label, &screen);
+        }
+        assert_eq!(
+            registry.focus_candidates("b-second"),
+            ["a-third", "z-first"]
+        );
+        assert_eq!(
+            registry.focus_candidates("a-third"),
+            ["z-first", "b-second"]
+        );
+        assert!(registry.focus_candidates("pending").is_empty());
+    }
+
+    #[test]
+    fn focus_candidates_use_replacement_slots_and_ignore_released_sources() {
+        let registry = Registry::default();
+        let screen = display(1920, 1030, 1.25);
+        let a = registry.reserve("a", 3).unwrap();
+        let _b = registry.reserve("b", 3).unwrap();
+        let _c = registry.reserve("c", 3).unwrap();
+        for label in ["a", "b", "c"] {
+            place(&registry, label, &screen);
+        }
+        a.release();
+        let _replacement = registry.reserve("replacement", 3).unwrap();
+        place(&registry, "replacement", &screen);
+        assert_eq!(registry.focus_candidates("c"), ["replacement", "b"]);
+        assert!(registry.focus_candidates("a").is_empty());
     }
 
     #[test]

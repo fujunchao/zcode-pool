@@ -112,11 +112,7 @@ async fn open(app: &AppHandle, label: &str, capacity: usize) -> SmokeResult<Webv
     .resizable(true)
     .data_directory(profile)
     .build()?;
-    window.on_window_event(move |event| {
-        if matches!(event, tauri::WindowEvent::Destroyed) {
-            permit.release();
-        }
-    });
+    login_windows::track(&window, permit);
     login_windows::place(app, label, false).await?;
     println!("落位完成：{label} {:?}", bounds(&window)?);
     Ok(window)
