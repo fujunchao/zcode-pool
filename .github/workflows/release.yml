@@ -13,7 +13,7 @@ jobs:
       contents: write
     env:
       # 手动派发（非 tag）时兜底用的发布标签 —— **发版时只改这一处**：tagName 与便携版附件上传都读它
-      RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.2.16' }}
+      RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.2.17' }}
     strategy:
       fail-fast: false
       matrix:
