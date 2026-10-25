@@ -9,6 +9,8 @@ pub const STATUS_INVALID: &str = "invalid";
 /// 邮箱来源：Outlook（历史数据，默认）或 cloudflare_temp_email 临时邮箱
 pub const KIND_OUTLOOK: &str = "outlook";
 pub const KIND_CF: &str = "cf";
+/// Microsoft 365 catch-all：地址是源级共享邮箱上的"标签"，凭据在 settings.json
+pub const KIND_M365: &str = "m365";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct MailAccount {
@@ -57,6 +59,9 @@ pub struct Summary {
 impl MailAccount {
     pub fn is_cf(&self) -> bool {
         self.kind == KIND_CF
+    }
+    pub fn is_m365(&self) -> bool {
+        self.kind == KIND_M365
     }
     pub fn to_summary(&self) -> Summary {
         Summary {

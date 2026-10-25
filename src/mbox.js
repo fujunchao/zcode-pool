@@ -62,8 +62,9 @@ function badge(a) {
   return `<span class="chip ${k}"${note}>${esc(tr("mb.status", key))}</span>`;
 }
 
-// 邮箱来源标记：只标 cf（现场建的临时地址），Outlook 是默认来源不标，免得列表变花。
+// 邮箱来源标记：只标 cf / m365（现场生成的地址），Outlook 是默认来源不标，免得列表变花。
 function kindChip(a) {
+  if (a.kind === "m365") return `<span class="chip acc" title="${esc(t("mb.m365KindTip"))}">${esc(t("mb.m365Kind"))}</span>`;
   if (a.kind !== "cf") return "";
   return `<span class="chip acc" title="${esc(t("mb.cfKindTip"))}">${esc(t("mb.cfKind"))}</span>`;
 }
@@ -130,6 +131,10 @@ export function mboxPage() {
         ${[1, 3, 5, 10].map((n) => `<option value="${n}">${n}</option>`).join("")}
       </select>
       <button class="btn" click="actions.mboxCfCreate()" title="${esc(t("mb.cfCreateTip"))}" ${b.running ? "disabled" : ""}>${ic("mail", 14)} ${t("mb.cfCreate")}</button>
+      <select class="sel mb-m365-n" id="mb-m365-n" title="${esc(t("mb.m365Count"))}" aria-label="${esc(t("mb.m365Count"))}" ${b.running ? "disabled" : ""}>
+        ${[1, 3, 5, 10].map((n) => `<option value="${n}">${n}</option>`).join("")}
+      </select>
+      <button class="btn" click="actions.mboxM365Create()" title="${esc(t("mb.m365CreateTip"))}" ${b.running ? "disabled" : ""}>${ic("mail", 14)} ${t("mb.m365Create")}</button>
       <button class="btn" click="actions.mboxExport()" ${M.list.length && !b.running ? "" : "disabled"}>${ic("export", 14)} ${t("mb.export")}</button>
       <label class="conc-wrap" title="${esc(t("mb.concTip"))}">
         <span>${esc(t("mb.conc"))}</span>
@@ -271,6 +276,22 @@ export async function mboxCfCreate() {
     } else {
       toast(t("mb.cfNone"), "err", errors[0] || t("mb.cfNoConfig"));
     }
+  } catch (e) {
+    toast(String(e).replace(/^[a-z_]+:/, ""), "err");
+  }
+}
+
+/** 现场生成 M365 catch-all 地址（kind="m365"）并直接入库：凭据在设置页的源级配置里，行只是地址标签。 */
+export async function mboxM365Create() {
+  if (M.batch.running) return;
+  const n = Number(document.querySelector("#mb-m365-n")?.value || 1) || 1;
+  try {
+    const r = await invoke("m365_addr_create", { count: n });
+    const created = (r && r.created) || [];
+    await mboxLoad();
+    rerender();
+    if (created.length) toast(t("mb.m365Created", { n: created.length }), "ok");
+    else toast(t("mb.m365None"), "warn");
   } catch (e) {
     toast(String(e).replace(/^[a-z_]+:/, ""), "err");
   }

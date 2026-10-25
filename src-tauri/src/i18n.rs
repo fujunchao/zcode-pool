@@ -59,6 +59,14 @@ pub fn init_from_settings(s: &crate::store::Settings) {
 }
 
 const ZH: &[(&str, &str)] = &[
+    // ── M365 catch-all 邮箱源 ──
+    ("err.m365.noconfig", "还没有配置 M365 邮箱源（租户 / 客户端 ID / 邮箱 / 域名）"),
+    ("err.m365.reauth", "M365 登录已失效，请到设置里重新登录一次"),
+    ("err.m365.public_client", "这个应用还不是公共客户端：请在应用清单里把 allowPublicClient 设为 true"),
+    ("err.m365.consent", "缺少 Mail.Read 授权：请让管理员在「API 权限」里同意"),
+    ("err.m365.throttled", "M365 取信被限流了，稍后再试"),
+    ("err.m365.login_expired", "设备码已过期，请重新发起登录"),
+    ("err.m365.http", "M365 请求失败：{e}"),
     ("err.write", "写入失败：{e}"),
     ("err.gw.already_running", "中继已经在运行了"),
     ("err.gw.bind", "中继监听失败（端口被占用？）：{e}"),
@@ -240,6 +248,14 @@ const ZH: &[(&str, &str)] = &[
 ];
 
 const EN: &[(&str, &str)] = &[
+    // ── M365 catch-all mailbox source ──
+    ("err.m365.noconfig", "M365 mailbox source is not configured (tenant / client id / mailbox / domain)"),
+    ("err.m365.reauth", "M365 sign-in expired — sign in again in Settings"),
+    ("err.m365.public_client", "This app is not a public client: set allowPublicClient to true in the app manifest"),
+    ("err.m365.consent", "Mail.Read is not granted: have an admin consent to it under API permissions"),
+    ("err.m365.throttled", "M365 mail read was throttled — try again later"),
+    ("err.m365.login_expired", "The device code expired — start the sign-in again"),
+    ("err.m365.http", "M365 request failed: {e}"),
     ("err.write", "Write failed: {e}"),
     ("err.gw.already_running", "The relay is already running"),
     ("err.gw.bind", "Relay failed to listen (port taken?): {e}"),

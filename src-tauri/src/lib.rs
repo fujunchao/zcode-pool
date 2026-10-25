@@ -7,6 +7,7 @@ mod flowlog;
 mod gateway;
 mod graph;
 mod login_windows;
+mod m365;
 mod oauth;
 mod pool;
 mod prompt;
@@ -733,6 +734,69 @@ async fn reg_fetch_link(
         .clone();
     let cur_flow = flow.unwrap_or_default();
 
+    // M365 catch-all：一个邮箱服务全部并发流程 —— 按收件人归因 + 已消费消息去重
+    if acc.is_m365() {
+        let paths = Paths::detect();
+        let st = load_settings(&paths);
+        let cfg = st.m365_cfg().ok_or_else(|| i18n::tr("err.m365.noconfig"))?;
+        let rt = st
+            .m365_refresh_token
+            .clone()
+            .filter(|t| !t.trim().is_empty())
+            .ok_or_else(|| i18n::tr("err.m365.reauth"))?;
+        let (tok, new_rt) = match m365::access_token(&cfg, &rt) {
+            Ok(v) => v,
+            Err(e) => {
+                if !cur_flow.is_empty() {
+                    let short: String = e.chars().take(200).collect();
+                    flowlog::log(&cur_flow, "link-fetch-fail", &short);
+                }
+                if m365::is_credential_error(&e) {
+                    let _ = pool::set_status(
+                        &root,
+                        &email,
+                        pool::STATUS_INVALID,
+                        Some(i18n::tr("err.m365.reauth")),
+                    );
+                }
+                return Err(e);
+            }
+        };
+        if let Some(n) = new_rt {
+            persist_m365_refresh(&paths, n);
+        }
+        match m365::fetch_for(&cfg, &tok, &acc.email, since.unwrap_or(0), &cur_flow) {
+            Ok(v) => {
+                if !cur_flow.is_empty() {
+                    let scanned = v.get("scanned").and_then(|x| x.as_u64()).unwrap_or(0);
+                    let n = v.get("links").and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(0);
+                    let masked = mask_email(&acc.email);
+                    flowlog::log(
+                        &cur_flow,
+                        "link-fetch",
+                        &format!("m365 addr={masked} scanned={scanned} links={n}"),
+                    );
+                }
+                return Ok(v);
+            }
+            Err(e) => {
+                if !cur_flow.is_empty() {
+                    let short: String = e.chars().take(200).collect();
+                    flowlog::log(&cur_flow, "link-fetch-fail", &short);
+                }
+                if m365::is_credential_error(&e) {
+                    let _ = pool::set_status(
+                        &root,
+                        &email,
+                        pool::STATUS_INVALID,
+                        Some(i18n::tr("err.m365.reauth")),
+                    );
+                }
+                return Err(e);
+            }
+        }
+    }
+
     // 临时邮箱源（cloudflare_temp_email）：走管理接口取信，自己解码 raw MIME 抠链接
     if acc.is_cf() {
         let paths = Paths::detect();
@@ -1125,6 +1189,163 @@ async fn cf_create(app: AppHandle, count: Option<usize>) -> Result<Value, String
     drop(_guard);
     let _ = app.emit("pool-changed", ());
     Ok(json!({ "created": created, "errors": errors }))
+}
+
+/// 日志里对邮箱地址脱敏：只保留首字符与域名。
+fn mask_email(email: &str) -> String {
+    match email.split_once('@') {
+        Some((local, domain)) => {
+            let head: String = local.chars().take(1).collect();
+            format!("{head}***@{domain}")
+        }
+        None => "***".to_string(),
+    }
+}
+
+/// refresh_token 轮换后立即回写（Graph 每次刷新可能换新 token）。
+fn persist_m365_refresh(paths: &Paths, rt: String) {
+    let _guard = store_guard();
+    let mut s = load_settings(paths);
+    s.m365_refresh_token = Some(rt);
+    let _ = save_settings(paths, &s);
+}
+
+#[tauri::command]
+async fn set_m365_settings(
+    app: AppHandle,
+    tenant: Option<String>,
+    client_id: Option<String>,
+    mailbox: Option<String>,
+    domain: Option<String>,
+) -> Result<Value, String> {
+    let _guard = store_guard();
+    let paths = Paths::detect();
+    let mut s = load_settings(&paths);
+    // 传空串 = 清空该字段（用于停用整个源）；未传（None）= 保持不变
+    let clean = |v: String| -> Option<String> {
+        let t = v.trim().to_string();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
+    };
+    if let Some(v) = tenant {
+        s.m365_tenant = clean(v);
+    }
+    if let Some(v) = client_id {
+        s.m365_client_id = clean(v);
+    }
+    if let Some(v) = mailbox {
+        s.m365_mailbox = clean(v);
+    }
+    if let Some(v) = domain {
+        s.m365_domain = clean(v);
+    }
+    // 配置不成形就一并清掉登录态，避免残留 token 让界面误报「已登录」
+    if s.m365_cfg().is_none() {
+        s.m365_refresh_token = None;
+    }
+    save_settings(&paths, &s)?;
+    let configured = s.m365_cfg().is_some();
+    drop(_guard);
+    let _ = app.emit("state-changed", ());
+    Ok(json!({ "ok": true, "configured": configured }))
+}
+
+#[tauri::command]
+async fn m365_login_begin() -> Result<Value, String> {
+    let s = load_settings(&Paths::detect());
+    let cfg = s.m365_cfg().ok_or_else(|| i18n::tr("err.m365.noconfig"))?;
+    let d = m365::login_begin(&cfg)?;
+    Ok(json!({
+        "device_code": d.device_code,
+        "user_code": d.user_code,
+        "verification_uri": d.verification_uri,
+        "interval": d.interval,
+        "expires_in": d.expires_in,
+    }))
+}
+
+#[tauri::command]
+async fn m365_login_poll(app: AppHandle, device_code: String) -> Result<Value, String> {
+    let paths = Paths::detect();
+    let s = load_settings(&paths);
+    let cfg = s.m365_cfg().ok_or_else(|| i18n::tr("err.m365.noconfig"))?;
+    match m365::login_poll(&cfg, &device_code)? {
+        m365::LoginPoll::Pending => Ok(json!({ "pending": true })),
+        m365::LoginPoll::Done(rt) => {
+            {
+                let _guard = store_guard();
+                let mut s2 = load_settings(&paths);
+                s2.m365_refresh_token = Some(rt);
+                save_settings(&paths, &s2)?;
+            }
+            let _ = app.emit("state-changed", ());
+            Ok(json!({ "pending": false, "ok": true }))
+        }
+    }
+}
+
+#[tauri::command]
+async fn m365_test() -> Result<Value, String> {
+    let paths = Paths::detect();
+    let s = load_settings(&paths);
+    let cfg = s.m365_cfg().ok_or_else(|| i18n::tr("err.m365.noconfig"))?;
+    let rt = s
+        .m365_refresh_token
+        .clone()
+        .filter(|t| !t.trim().is_empty())
+        .ok_or_else(|| i18n::tr("err.m365.reauth"))?;
+    let (tok, new_rt) = m365::access_token(&cfg, &rt)?;
+    if let Some(n) = new_rt {
+        persist_m365_refresh(&paths, n);
+    }
+    let last = m365::probe(&cfg, &tok)?;
+    Ok(json!({
+        "ok": true,
+        "mailbox": cfg.mailbox,
+        "reachable": true,
+        "last_subject": last,
+    }))
+}
+
+#[tauri::command]
+async fn m365_addr_create(app: AppHandle, count: Option<usize>) -> Result<Value, String> {
+    let _guard = store_guard();
+    let paths = Paths::detect();
+    let settings = load_settings(&paths);
+    let cfg = settings.m365_cfg().ok_or_else(|| i18n::tr("err.m365.noconfig"))?;
+    let root = paths.store_dir();
+    let mut accounts = pool::load(&root);
+    let n = count.unwrap_or(1).clamp(1, 50);
+    let mut created: Vec<String> = Vec::new();
+    for _ in 0..n {
+        let addr = m365::random_address(&cfg.domain);
+        if pool::find(&accounts, &addr).is_some() {
+            continue;
+        }
+        accounts.push(pool::MailAccount {
+            email: addr.clone(),
+            password: rand_reg_password(),
+            client_id: String::new(),
+            refresh_token: String::new(),
+            status: pool::STATUS_NEW.to_string(),
+            verified_at: None,
+            note: None,
+            created_at: store::now_ts(),
+            kind: pool::KIND_M365.to_string(),
+            remote_id: None,
+        });
+        created.push(addr);
+    }
+    if !created.is_empty() {
+        pool::save(&root, &accounts)?;
+    }
+    drop(_guard);
+    let items: Vec<_> = pool::load(&root).iter().map(|a| a.to_summary()).collect();
+    let _ = app.emit("pool-changed", ());
+    Ok(json!({ "created": created, "accounts": items }))
 }
 
 #[tauri::command]
@@ -2036,6 +2257,11 @@ pub fn run() {
             set_cf_settings,
             cf_test,
             cf_create,
+            set_m365_settings,
+            m365_login_begin,
+            m365_login_poll,
+            m365_test,
+            m365_addr_create,
             pick_zcode_path,
             set_zcode_path,
             launch_zcode,

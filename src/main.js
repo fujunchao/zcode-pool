@@ -8,7 +8,7 @@ import {
   setMboxRerender, mboxLoad, mboxPage, mboxFilter, mboxToggle, mboxImport,
   mboxRemove, mboxDelete, mboxSelection, mboxVerify, mboxStop, mboxOnFlowDone, mboxRunning, mboxStats,
   mboxSelectAll, mboxSelectNone, mboxToggleRow, mboxExport, mboxRetryFailed, mboxDismissResult, mboxUpdateLine, mboxReauth,
-  mboxCfCreate, mboxOnTerminated, setMboxConc, mboxHeadSync,
+  mboxCfCreate, mboxM365Create, mboxOnTerminated, setMboxConc, mboxHeadSync,
 } from "./mbox.js";
 
 const $app = document.getElementById("app");
@@ -166,6 +166,82 @@ function autoPillTitle(s) {
   return esc(bits.join(" · "));
 }
 
+// M365 设备码登录：同一时间只允许一路弹窗 + 轮询；关掉弹窗即清定时器，避免重复轮询。
+const m365LoginState = { active: false, timer: 0 };
+
+function m365LoginStop() {
+  if (m365LoginState.timer) clearTimeout(m365LoginState.timer);
+  m365LoginState.timer = 0;
+  m365LoginState.active = false;
+}
+
+/** 展示设备码并轮询 m365_login_poll：成功 → 关弹窗 + 刷新状态；超时/异常 → 提示并收尾。 */
+function openM365Login(info) {
+  document.querySelector(".ov.m365")?.remove();
+  m365LoginStop();
+  m365LoginState.active = true;
+
+  const ov = document.createElement("div");
+  ov.className = "ov m365";
+  ov.innerHTML = `
+    <div class="modal" role="dialog" aria-modal="true" aria-label="${esc(t("s.m365CodeTitle"))}">
+      <div class="mhead">${ic("lock", 16)} <span>${esc(t("s.m365CodeTitle"))}</span></div>
+      <div class="mbody">
+        <div class="mnote" style="margin-bottom:12px">${esc(t("s.m365CodeBody", { url: info.verification_uri }))}</div>
+        <div class="reauth-code">${esc(info.user_code)}</div>
+        <div class="line" style="margin-top:10px;align-items:center">
+          <button class="btn g m365-open">${ic("export", 14)} ${esc(t("s.m365CodeOpen"))}</button>
+          <span class="mnote">${esc(t("s.m365Waiting"))}</span>
+        </div>
+      </div>
+      <div class="mfoot"><button class="btn g m365-close">${t("common.cancel")}</button></div>
+    </div>`;
+  document.body.appendChild(ov);
+
+  const close = () => {
+    m365LoginStop();
+    ov.remove();
+  };
+  const fail = (msg) => {
+    close();
+    toast(msg, "err");
+  };
+
+  ov.querySelector(".m365-open").addEventListener("click", () => invoke("open_external", { url: info.verification_uri }).catch(() => {}));
+  ov.querySelector(".m365-close").addEventListener("click", close);
+  ov.querySelector(".modal").addEventListener("click", (e) => e.stopPropagation());
+  ov.addEventListener("click", (e) => { if (e.target === ov) close(); });
+
+  // 设备码有 expires_in 有效期：按 interval 轮询，次数上限 = expires_in / interval（与后端的节奏一致）。
+  const step = Math.max(3, Number(info.interval) || 5);
+  const gap = step * 1000;
+  const maxTries = Math.ceil((Number(info.expires_in) || 900) / step);
+  let tries = 0;
+  const tick = async () => {
+    m365LoginState.timer = 0;
+    if (!m365LoginState.active) return;
+    tries += 1;
+    if (tries > maxTries) return fail(t("s.m365LoginTimeout"));
+    try {
+      const r = await invoke("m365_login_poll", { deviceCode: info.device_code });
+      if (!m365LoginState.active) return;
+      if (r && r.pending === false && r.ok !== false) {
+        close();
+        toast(t("s.m365LoginOk"), "ok");
+        await refresh();
+        render();
+        return;
+      }
+    } catch (e) {
+      if (!m365LoginState.active) return;
+      fail(stripErr(e));
+      return;
+    }
+    m365LoginState.timer = setTimeout(tick, gap);
+  };
+  m365LoginState.timer = setTimeout(tick, 1500);
+}
+
 const actions = {
   async refresh() { await refresh(); render(); },
 
@@ -185,6 +261,7 @@ const actions = {
   },
   async mboxImport() { await mboxImport(); },
   async mboxCfCreate() { await mboxCfCreate(); },
+  async mboxM365Create() { await mboxM365Create(); },
   async mboxVerify() { await mboxVerify(); },
   async mboxStop() { mboxStop(); },
   async mboxFilter(f) { mboxFilter(f); },
@@ -592,6 +669,33 @@ const actions = {
         toast(t("s.cfOk", { n: (r && r.visible) || 0 }), "ok");
       } catch (e) { toast(t("s.cfFail"), "err", stripErr(e)); }
     },
+  async saveM365() {
+    const val = (sel) => (document.querySelector(sel)?.value || "").trim();
+    try {
+      await invoke("set_m365_settings", {
+        tenant: val("input.m365-tenant"),
+        clientId: val("input.m365-client"),
+        mailbox: val("input.m365-mailbox"),
+        domain: val("input.m365-domain"),
+      });
+      await refresh(); render();
+      toast(t("s.m365Saved"), "ok");
+    } catch (e) { toast(stripErr(e), "err"); }
+  },
+  async testM365() {
+    try {
+      const r = await invoke("m365_test");
+      toast(t("s.m365TestOk", { s: (r && r.last_subject) || "-" }), "ok");
+    } catch (e) { toast(t("s.m365TestFail"), "err", stripErr(e)); }
+  },
+  async m365Login() {
+    if (m365LoginState.active) return; // 已在登录中：不重复发起，也不并发轮询
+    let info;
+    try {
+      info = await invoke("m365_login_begin");
+    } catch (e) { toast(stripErr(e), "err"); return; }
+    openM365Login(info);
+  },
   acctQuota(id) {
     const dueAt = quotaDue[id];
     loadAcctQuota(id).then(() => {
@@ -1401,6 +1505,37 @@ function settingsView(s) {
         </div>
       </div>
       <div class="grp">
+        <div class="gh">${t("s.m365Label")}${s.m365_configured
+          ? s.m365_logged_in
+            ? `<span class="chip ok" style="margin-left:8px">${t("s.m365Ready")}</span>`
+            : `<span class="chip warn" style="margin-left:8px">${t("s.m365NotLogin")}</span>`
+          : ""}</div>
+        <div class="gb">
+          <div class="line">
+            <input class="inp mono m365-tenant" type="text" value="${esc(s.m365_tenant || "")}"
+              placeholder="${t("s.m365TenantPh")}" keydown="onM365Key(event)">
+          </div>
+          <div class="line">
+            <input class="inp mono m365-client" type="text" value="${esc(s.m365_client_id || "")}"
+              placeholder="${t("s.m365ClientPh")}" keydown="onM365Key(event)">
+          </div>
+          <div class="line">
+            <input class="inp mono m365-mailbox" type="text" value="${esc(s.m365_mailbox || "")}"
+              placeholder="${t("s.m365MailboxPh")}" keydown="onM365Key(event)">
+          </div>
+          <div class="line">
+            <input class="inp mono m365-domain" type="text" value="${esc(s.m365_domain || "")}"
+              placeholder="${t("s.m365DomainPh")}" keydown="onM365Key(event)">
+          </div>
+          <div class="line" style="margin-top:10px">
+            <button class="btn g" click="actions.saveM365()">${t("common.save")}</button>
+            <button class="btn g" click="actions.m365Login()">${t("s.m365Login")}</button>
+            <button class="btn g" click="actions.testM365()">${t("s.m365Test")}</button>
+          </div>
+          <div class="hint" style="margin-top:12px">${t("s.m365Hint")}</div>
+        </div>
+      </div>
+      <div class="grp">
         <div class="gh">${t("s.pathLabel")}</div>
         <div class="gb">
           <div class="line">
@@ -1601,6 +1736,7 @@ window.actions = actions;
 window.onPathKey = (e) => { if (e.key === "Enter") actions.savePath(); };
 window.onProxyKey = (e) => { if (e.key === "Enter") actions.saveProxy(); };
 window.onCfKey = (e) => { if (e.key === "Enter") actions.saveCf(); };
+window.onM365Key = (e) => { if (e.key === "Enter") actions.saveM365(); };
 window.onRenameKey = (e, id) => {
   if (e.key === "Enter") actions.doRename(id);
   if (e.key === "Escape") actions.cancelRename();

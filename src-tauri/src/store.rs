@@ -142,6 +142,19 @@ pub struct Settings {
     #[serde(default)]
     pub cf_domain: Option<String>,
 
+    /// Microsoft 365 catch-all 邮箱源（委派模式，走 Microsoft Graph）。
+    /// refresh_token **只存本机文件**，不进 get_state / 日志 / 接口返回。
+    #[serde(default)]
+    pub m365_tenant: Option<String>,
+    #[serde(default)]
+    pub m365_client_id: Option<String>,
+    #[serde(default)]
+    pub m365_mailbox: Option<String>,
+    #[serde(default)]
+    pub m365_domain: Option<String>,
+    #[serde(default)]
+    pub m365_refresh_token: Option<String>,
+
     /// 批量注册并发数（1–5，默认 2）。缺省时按 2 处理。
     #[serde(default)]
     pub reg_concurrency: Option<u32>,
@@ -185,6 +198,22 @@ impl Settings {
         };
         cfg.is_ready().then_some(cfg)
     }
+    /// M365 catch-all 源：四项配置齐了才算可用（refresh_token 单独判断）
+    pub fn m365_cfg(&self) -> Option<crate::m365::Cfg> {
+        let cfg = crate::m365::Cfg {
+            tenant: self.m365_tenant.clone().unwrap_or_default(),
+            client_id: self.m365_client_id.clone().unwrap_or_default(),
+            mailbox: self.m365_mailbox.clone().unwrap_or_default(),
+            domain: self.m365_domain.clone().unwrap_or_default(),
+        };
+        cfg.is_ready().then_some(cfg)
+    }
+    pub fn m365_logged_in(&self) -> bool {
+        self.m365_refresh_token
+            .as_deref()
+            .map(|t| !t.trim().is_empty())
+            .unwrap_or(false)
+    }
     /// 批量注册并发数（1–5，默认 2）
     pub fn reg_concurrency(&self) -> u32 {
         self.reg_concurrency.unwrap_or(2).clamp(1, 5)
@@ -224,6 +253,13 @@ pub struct AppState {
     pub cf_configured: bool,
     pub cf_base_url: Option<String>,
     pub cf_domain: Option<String>,
+    /// M365 catch-all 源：只回「配没配 / 登没登」+ 非敏感项，**refresh_token 永不出现在这里**
+    pub m365_configured: bool,
+    pub m365_logged_in: bool,
+    pub m365_tenant: Option<String>,
+    pub m365_client_id: Option<String>,
+    pub m365_mailbox: Option<String>,
+    pub m365_domain: Option<String>,
     /// 批量注册并发数（1–5，默认 2）
     pub reg_concurrency: u32,
     pub language: String,
@@ -1613,6 +1649,12 @@ pub fn get_state(paths: &Paths) -> Result<AppState, String> {
         cf_configured: settings.cf_cfg().is_some(),
         cf_base_url: settings.cf_base_url.clone(),
         cf_domain: settings.cf_domain.clone(),
+        m365_configured: settings.m365_cfg().is_some(),
+        m365_logged_in: settings.m365_logged_in(),
+        m365_tenant: settings.m365_tenant.clone(),
+        m365_client_id: settings.m365_client_id.clone(),
+        m365_mailbox: settings.m365_mailbox.clone(),
+        m365_domain: settings.m365_domain.clone(),
         reg_concurrency: settings.reg_concurrency(),
         language: crate::i18n::current().as_str().to_string(),
     })
