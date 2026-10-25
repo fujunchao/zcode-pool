@@ -36,6 +36,14 @@ nul
 *.tmp
 *.partial
 
+# 本地临时产物（调研笔记 / 探针输出，勿提交）
+tmp/
+
+# 本地分析/方案文档：按项目约定不入库（需要时自行 unignore）
+docs/project-understanding.md
+docs/fixes/m365-catchall-source.md
+docs/research/
+
 # Local dev helpers / stray env artifacts
 capture.ps1
 %SystemDrive%/
