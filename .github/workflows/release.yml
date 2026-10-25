@@ -13,7 +13,7 @@ jobs:
       contents: write
     env:
       # 手动派发（非 tag）时兜底用的发布标签 —— **发版时只改这一处**：tagName 与便携版附件上传都读它
-      RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.2.17' }}
+      RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.2.18' }}
     strategy:
       fail-fast: false
       matrix:
@@ -56,20 +56,19 @@ jobs:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: 'Z·POOL ${{ env.RELEASE_TAG }}'
           releaseBody: |
-            本版新增
+            本版修复
 
-            - **新增 Microsoft 365 catch-all 邮箱源**：在「设置 → Microsoft 365 catch-all」填入租户 ID、
-              应用（客户端）ID、收信邮箱与生成地址的域名，用设备码登录一次，之后取信全程静默。
-            - **Graph 取信 + 按收件人归因**：一个 catch-all 邮箱服务全部并发注册流程，按邮件的
-              to/cc 精确匹配本次注册地址，且只接受 /auth/verify_email 链接 —— 欢迎信里的普通链接
-              不会被误用；已消费消息不重复使用，并发注册不串号。
-            - **单飞取信与限流**：收件箱 + 垃圾箱的薄列表快照 1.5 秒内复用，命中后才补取单封正文，
-              峰值 2 次并发请求，低于 Graph 每邮箱 4 并发的限制；日志里的邮箱地址做脱敏。
-            - **地址现场生成**：邮箱库新增「生成地址」，批量生成 <10 位字母数字>@域名 并入库，
-              可直接勾选去跑批量注册。
-            - 保留原有 Outlook 与 cloudflare 临时邮箱源，行为不变；未配置 M365 时不会进入该分支。
-            - 委派模式要求 Entra 应用开启「允许公共客户端流」并授予 Graph 委派权限 Mail.Read
-              （共享邮箱再加 Mail.Read.Shared）；凭据只保存在本机 ~/.zcode-pool/settings.json。
+            - **邮箱库新增「来源」选择**：点「生成地址」前先选来源 —— Cloudflare 临时邮箱 或
+              Microsoft 365 catch-all；未配置的来源会禁用并标注，已配置未登录会提示「未登录」，
+              选择结果会记住，重启后仍是上次那个源。
+            - **每一行都能看到来源**：邮箱列表新增来源 chip（Outlook / 临时邮箱 / M365），
+              并可按来源筛选；「自动验证」按钮旁会显示本次选中的来源汇总（如 M365 ×2 · 临时邮箱 ×1），
+              验证按每行来源自动路由，不再出现"两个源都配了不知道用哪个"。
+            - **修复导入误判**：导入 txt 时，M365 catch-all 域名下的地址此前会被当成 Outlook，
+              现在会正确标为 M365；更新已有行时也不会把 cf/m365 降级成 Outlook。
+            - **设置页新增「邮箱源」一览**：一眼看清 Outlook / 临时邮箱 / M365 各自是否就绪。
+            - 保留 v0.2.17 的 M365 取信能力：按收件人归因、单飞限流、verify_email 链接白名单、
+              已消费消息去重与日志地址脱敏均不变。
 
             下载：Windows `*_x64-setup.exe` / `*_portable.exe` · macOS `*_universal.dmg` · Linux `*.deb` / `*.AppImage`
 
