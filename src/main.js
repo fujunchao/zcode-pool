@@ -8,7 +8,7 @@ import {
   setMboxRerender, mboxLoad, mboxPage, mboxFilter, mboxToggle, mboxImport,
   mboxRemove, mboxDelete, mboxSelection, mboxVerify, mboxStop, mboxOnFlowDone, mboxRunning, mboxStats,
   mboxSelectAll, mboxSelectNone, mboxToggleRow, mboxExport, mboxRetryFailed, mboxDismissResult, mboxUpdateLine, mboxReauth,
-  mboxCfCreate, mboxM365Create, mboxOnTerminated, setMboxConc, mboxHeadSync,
+  mboxCreate, mboxSetSrc, mboxKindFilter, setMboxSources, mboxOnTerminated, setMboxConc, mboxHeadSync,
 } from "./mbox.js";
 
 const $app = document.getElementById("app");
@@ -260,11 +260,11 @@ const actions = {
     render();
   },
   async mboxImport() { await mboxImport(); },
-  async mboxCfCreate() { await mboxCfCreate(); },
-  async mboxM365Create() { await mboxM365Create(); },
+  async mboxCreate() { await mboxCreate(); },
   async mboxVerify() { await mboxVerify(); },
   async mboxStop() { mboxStop(); },
   async mboxFilter(f) { mboxFilter(f); },
+  async mboxKindFilter(k) { mboxKindFilter(k); },
   async mboxDelete() {
     const emails = mboxSelection();
     if (!emails.length) return;
@@ -1485,6 +1485,15 @@ function settingsView(s) {
         </div>
       </div>
       <div class="grp">
+        <div class="gh">${t("s.srcLabel")}</div>
+        <div class="gb">
+          <div class="rstat"><span class="k">${t("mb.outlookKind")}</span><span class="v">${t("s.srcAlways")}</span></div>
+          <div class="rstat"><span class="k">${t("s.srcCf")}</span><span class="v${s.cf_configured ? "" : " dim"}">${s.cf_configured ? t("s.srcReady") : t("s.srcUnset")}</span></div>
+          <div class="rstat"><span class="k">${t("s.srcM365")}</span><span class="v${s.m365_configured && s.m365_logged_in ? "" : " dim"}">${!s.m365_configured ? t("s.srcUnset") : s.m365_logged_in ? t("s.srcReady") : t("s.srcNoLogin")}</span></div>
+          <div class="hint" style="margin-top:10px">${t("s.srcHint")}</div>
+        </div>
+      </div>
+      <div class="grp">
         <div class="gh">${t("s.cfLabel")}${s.cf_configured ? `<span class="chip ok" style="margin-left:8px">${t("s.cfReady")}</span>` : ""}</div>
         <div class="gb">
           <div class="line">
@@ -1620,6 +1629,7 @@ function render() {
   const s = state;
   acctPruneSel();
   setMboxConc(s.reg_concurrency ?? 2);
+  setMboxSources({ cf: !!s.cf_configured, m365: !!s.m365_configured, m365LoggedIn: !!s.m365_logged_in }, s.mail_source || "");
   const active = s.accounts.find((a) => a.is_active) || null;
   const unsaved = s.live_logged_in && !active;
 
@@ -1752,6 +1762,7 @@ document.addEventListener("change", (e) => {
   const acbx = el.closest ? el.closest(".acct-check") : null;
   if (acbx) { acctToggle(acbx.dataset.id, acbx.checked); render(); return; }
   if (el.id === "mb-all") { mboxSelectAll(el.checked); return; }
+  if (el.id === "mb-src") { mboxSetSrc(el.value); return; }
   if (el.id === "mb-conc") {
     const n = Number(el.value) || 2;
     setMboxConc(n);

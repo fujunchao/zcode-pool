@@ -168,29 +168,35 @@ pub struct ImportResult {
 /// 为什么需要：txt 行里只有 `email----password----client_id----refresh_token`，没有来源字段，
 /// 而手工维护（导入 txt / 更新一行）恰恰是 cf 地址进入邮箱库的主要路径 —— 不推断的话它们会被
 /// 当成 Outlook 去 Graph 取信，永远取不到验证链接。域名是配置里现成的信息，不必让用户再选一次。
-pub fn infer_kind(email: &str, cf_domain: Option<&str>) -> &'static str {
-    let dom = cf_domain
-        .unwrap_or("")
-        .trim()
-        .trim_start_matches('@')
-        .to_ascii_lowercase();
-    if dom.is_empty() {
+pub fn infer_kind(email: &str, cf_domain: Option<&str>, m365_domain: Option<&str>) -> &'static str {
+    let Some((_, d)) = email.rsplit_once('@') else {
         return KIND_OUTLOOK;
-    }
-    match email.rsplit_once('@') {
-        Some((_, d)) => {
-            let d = d.to_ascii_lowercase();
-            if d == dom || d.ends_with(&format!(".{dom}")) {
-                KIND_CF
-            } else {
-                KIND_OUTLOOK
-            }
-        }
-        None => KIND_OUTLOOK,
+    };
+    let d = d.to_ascii_lowercase();
+    let hit = |dom: Option<&str>| -> bool {
+        let dom = dom
+            .unwrap_or("")
+            .trim()
+            .trim_start_matches('@')
+            .to_ascii_lowercase();
+        !dom.is_empty() && (d == dom || d.ends_with(&format!(".{dom}")))
+    };
+    if hit(m365_domain) {
+        KIND_M365
+    } else if hit(cf_domain) {
+        KIND_CF
+    } else {
+        KIND_OUTLOOK
     }
 }
 
-pub fn import(accounts: &mut Vec<MailAccount>, raw: &str, now: String, cf_domain: Option<&str>) -> ImportResult {
+pub fn import(
+    accounts: &mut Vec<MailAccount>,
+    raw: &str,
+    now: String,
+    cf_domain: Option<&str>,
+    m365_domain: Option<&str>,
+) -> ImportResult {
     let parsed = parse_lines(raw);
     let mut r = ImportResult {
         total_parsed: parsed.len(),
@@ -201,7 +207,7 @@ pub fn import(accounts: &mut Vec<MailAccount>, raw: &str, now: String, cf_domain
             r.skipped += 1;
             continue;
         }
-        let kind = infer_kind(&email, cf_domain).to_string();
+        let kind = infer_kind(&email, cf_domain, m365_domain).to_string();
         accounts.push(MailAccount {
             email,
             password,
@@ -258,7 +264,13 @@ mod tests {
             kind: KIND_OUTLOOK.into(),
             remote_id: None,
         }];
-        let r = import(&mut acc, "a@b.com----new----c----r\nc@d.com----p----c----r\n", "now".into(), None);
+        let r = import(
+            &mut acc,
+            "a@b.com----new----c----r\nc@d.com----p----c----r\n",
+            "now".into(),
+            None,
+            None,
+        );
         assert_eq!(r.added, 1);
         assert_eq!(r.skipped, 1);
         assert_eq!(acc.len(), 2);
@@ -272,7 +284,7 @@ mod tests {
         // 手工导入是 cf 地址进库的主要路径：域名对得上就必须标成 cf，否则会去 Graph 白跑
         let mut acc: Vec<MailAccount> = vec![];
         let raw = "u1@mail.example.com----p----c----r\nu2@em.example.com----p----c----r\nu3@other.com----p----c----r\n";
-        let r = import(&mut acc, raw, "now".into(), Some("mail.example.com"));
+        let r = import(&mut acc, raw, "now".into(), Some("mail.example.com"), None);
         assert_eq!(r.added, 3);
         assert_eq!(acc[0].kind, KIND_CF);
         assert_eq!(acc[1].kind, KIND_OUTLOOK, "同 apex 的子域但不匹配收信域名");
@@ -280,12 +292,35 @@ mod tests {
 
         // 配的是 apex 域名时，其子域也算同一服务
         let mut acc2: Vec<MailAccount> = vec![];
-        import(&mut acc2, "u4@mail.example.com----p----c----r\n", "now".into(), Some("example.com"));
+        import(
+            &mut acc2,
+            "u4@mail.example.com----p----c----r\n",
+            "now".into(),
+            Some("example.com"),
+            None,
+        );
         assert_eq!(acc2[0].kind, KIND_CF);
 
         // 域名大小写 / 带 @ 前缀 / 带空格都要认；后缀匹配必须卡在 `.` 上（notexample.com 不算）
-        assert_eq!(infer_kind("u5@Mail.Example.COM", Some(" @mail.example.com ")), KIND_CF);
-        assert_eq!(infer_kind("u6@notexample.com", Some("example.com")), KIND_OUTLOOK);
+        assert_eq!(infer_kind("u5@Mail.Example.COM", Some(" @mail.example.com "), None), KIND_CF);
+        assert_eq!(infer_kind("u6@notexample.com", Some("example.com"), None), KIND_OUTLOOK);
+        assert_eq!(infer_kind("u7@x.example.com", None, Some("example.com")), KIND_M365);
+        assert_eq!(infer_kind("u8@x.example.com", Some("example.com"), Some("m365.example.com")), KIND_CF);
+    }
+
+    #[test]
+    fn import_marks_m365_addresses_by_domain() {
+        // M365 catch-all 域名必须标成 m365，否则会被当成 Outlook 去 Graph 白跑
+        let mut acc: Vec<MailAccount> = vec![];
+        import(
+            &mut acc,
+            "m1@catch.example.com----p----c----r\nm2@example.com----p----c----r\n",
+            "now".into(),
+            None,
+            Some("catch.example.com"),
+        );
+        assert_eq!(acc[0].kind, KIND_M365);
+        assert_eq!(acc[1].kind, KIND_OUTLOOK);
     }
 
     #[test]

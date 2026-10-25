@@ -155,6 +155,10 @@ pub struct Settings {
     #[serde(default)]
     pub m365_refresh_token: Option<String>,
 
+    /// 邮箱库「生成地址」上次选中的来源（cf | m365；空 = 未选）
+    #[serde(default)]
+    pub mail_source: Option<String>,
+
     /// 批量注册并发数（1–5，默认 2）。缺省时按 2 处理。
     #[serde(default)]
     pub reg_concurrency: Option<u32>,
@@ -260,6 +264,8 @@ pub struct AppState {
     pub m365_client_id: Option<String>,
     pub m365_mailbox: Option<String>,
     pub m365_domain: Option<String>,
+    /// 邮箱库「生成地址」默认来源（cf | m365；空 = 未选）
+    pub mail_source: String,
     /// 批量注册并发数（1–5，默认 2）
     pub reg_concurrency: u32,
     pub language: String,
@@ -1655,6 +1661,7 @@ pub fn get_state(paths: &Paths) -> Result<AppState, String> {
         m365_client_id: settings.m365_client_id.clone(),
         m365_mailbox: settings.m365_mailbox.clone(),
         m365_domain: settings.m365_domain.clone(),
+        mail_source: settings.mail_source.clone().unwrap_or_default(),
         reg_concurrency: settings.reg_concurrency(),
         language: crate::i18n::current().as_str().to_string(),
     })

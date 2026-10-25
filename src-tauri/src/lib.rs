@@ -902,9 +902,17 @@ async fn pool_import_pick(app: AppHandle) -> Result<Value, String> {
 
     let _guard = store_guard();
     let root = Paths::detect().store_dir();
-    let cf_domain = load_settings(&Paths::detect()).cf_domain;
+    let st = load_settings(&Paths::detect());
+    let cf_domain = st.cf_domain;
+    let m365_domain = st.m365_domain;
     let mut accounts = pool::load(&root);
-    let r = pool::import(&mut accounts, &raw, store::now_ts(), cf_domain.as_deref());
+    let r = pool::import(
+        &mut accounts,
+        &raw,
+        store::now_ts(),
+        cf_domain.as_deref(),
+        m365_domain.as_deref(),
+    );
     pool::save(&root, &accounts)?;
     drop(_guard);
 
@@ -1009,18 +1017,20 @@ async fn pool_upsert(app: AppHandle, line: String) -> Result<Value, String> {
     };
     let _guard = store_guard();
     let root = Paths::detect().store_dir();
-    let cf_domain = load_settings(&Paths::detect()).cf_domain;
+    let st = load_settings(&Paths::detect());
+    let cf_domain = st.cf_domain;
+    let m365_domain = st.m365_domain;
     let mut accounts = pool::load(&root);
-    let hint = pool::infer_kind(&email, cf_domain.as_deref());
+    let hint = pool::infer_kind(&email, cf_domain.as_deref(), m365_domain.as_deref());
     let updated = if let Some(a) = pool::find_mut(&mut accounts, &email) {
         a.password = password;
         a.client_id = client_id;
         a.refresh_token = refresh_token;
         a.status = pool::STATUS_NEW.to_string();
         a.note = None;
-        // 只做单向修正（outlook → cf）：域名对得上就说明这行是临时邮箱地址
-        if hint == pool::KIND_CF {
-            a.kind = pool::KIND_CF.to_string();
+        // 域名能对上就修正来源；对不上保持原样（不把 cf/m365 降级成 outlook）
+        if hint != pool::KIND_OUTLOOK {
+            a.kind = hint.to_string();
         }
         true
     } else {
@@ -1346,6 +1356,24 @@ async fn m365_addr_create(app: AppHandle, count: Option<usize>) -> Result<Value,
     let items: Vec<_> = pool::load(&root).iter().map(|a| a.to_summary()).collect();
     let _ = app.emit("pool-changed", ());
     Ok(json!({ "created": created, "accounts": items }))
+}
+
+/// 记住邮箱库「生成地址」选中的来源；空值表示未选（前端会按已配置的来源兜底）。
+#[tauri::command]
+async fn set_mail_source(app: AppHandle, source: Option<String>) -> Result<Value, String> {
+    let _guard = store_guard();
+    let paths = Paths::detect();
+    let mut s = load_settings(&paths);
+    let v = source.unwrap_or_default().trim().to_ascii_lowercase();
+    s.mail_source = match v.as_str() {
+        "cf" | "m365" => Some(v),
+        _ => None,
+    };
+    save_settings(&paths, &s)?;
+    let saved = s.mail_source.clone().unwrap_or_default();
+    drop(_guard);
+    let _ = app.emit("state-changed", ());
+    Ok(json!({ "ok": true, "source": saved }))
 }
 
 #[tauri::command]
@@ -2262,6 +2290,7 @@ pub fn run() {
             m365_login_poll,
             m365_test,
             m365_addr_create,
+            set_mail_source,
             pick_zcode_path,
             set_zcode_path,
             launch_zcode,

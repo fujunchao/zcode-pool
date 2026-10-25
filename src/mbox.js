@@ -14,8 +14,12 @@ const tr = (group, key) => t(`${group}.${key}`);
 const M = {
   list: [],
   filter: "all",
+  kindFilter: "all",
   sel: new Set(),
   conc: 2,
+  src: "",
+  srcs: { cf: false, m365: false, m365LoggedIn: false },
+  srcTouched: false,
   batch: { running: false, concurrency: 2, starting: 0, pumping: false, queue: [], total: 0, done: 0, active: new Map(), results: [] },
   lastRun: null,
 };
@@ -27,6 +31,17 @@ export function setMboxConc(n) {
   const v = Math.min(5, Math.max(1, Number(n) || 2));
   M.conc = v;
   if (!M.batch.running) M.batch.concurrency = v;
+}
+
+/** 邮箱源状态从 main.js（state/settings）同步：cfg = {cf, m365, m365LoggedIn}，preferred = 上次选择的源。 */
+export function setMboxSources(cfg, preferred) {
+  const c = cfg || {};
+  M.srcs.cf = !!c.cf;
+  M.srcs.m365 = !!c.m365;
+  M.srcs.m365LoggedIn = !!c.m365LoggedIn;
+  const usable = (v) => (v === "cf" && M.srcs.cf) || (v === "m365" && M.srcs.m365);
+  if (!M.srcTouched && usable(preferred)) M.src = preferred;
+  if (!usable(M.src)) M.src = M.srcs.m365 ? "m365" : M.srcs.cf ? "cf" : "";
 }
 
 export function mboxRunning() {
@@ -50,9 +65,14 @@ export async function mboxLoad() {
 }
 
 function filtered() {
-  if (M.filter === "new") return M.list.filter((a) => a.status !== "verified");
-  if (M.filter === "verified") return M.list.filter((a) => a.status === "verified");
-  return M.list;
+  const byStatus =
+    M.filter === "new"
+      ? M.list.filter((a) => a.status !== "verified")
+      : M.filter === "verified"
+        ? M.list.filter((a) => a.status === "verified")
+        : M.list;
+  if (M.kindFilter === "all") return byStatus;
+  return byStatus.filter((a) => (a.kind || "outlook") === M.kindFilter);
 }
 
 function badge(a) {
@@ -62,11 +82,12 @@ function badge(a) {
   return `<span class="chip ${k}"${note}>${esc(tr("mb.status", key))}</span>`;
 }
 
-// 邮箱来源标记：只标 cf / m365（现场生成的地址），Outlook 是默认来源不标，免得列表变花。
+// 邮箱来源标记：outlook / cf / m365 都标 —— 现场生成的地址用 acc chip，Outlook 用中性 chip。
 function kindChip(a) {
-  if (a.kind === "m365") return `<span class="chip acc" title="${esc(t("mb.m365KindTip"))}">${esc(t("mb.m365Kind"))}</span>`;
-  if (a.kind !== "cf") return "";
-  return `<span class="chip acc" title="${esc(t("mb.cfKindTip"))}">${esc(t("mb.cfKind"))}</span>`;
+  const kind = a.kind || "outlook";
+  if (kind === "m365") return `<span class="chip acc" title="${esc(t("mb.m365KindTip"))}">${esc(t("mb.m365Kind"))}</span>`;
+  if (kind === "cf") return `<span class="chip acc" title="${esc(t("mb.cfKindTip"))}">${esc(t("mb.cfKind"))}</span>`;
+  return `<span class="chip" title="${esc(t("mb.outlookKindTip"))}">${esc(t("mb.outlookKind"))}</span>`;
 }
 
 export function mboxPage() {
@@ -75,6 +96,27 @@ export function mboxPage() {
   const verified = M.list.filter((a) => a.status === "verified").length;
   const attention = M.list.filter((a) => a.status === "failed" || a.status === "invalid").length;
   const activeList = [...b.active.values()].map((v) => v.email);
+  const noSrc = !M.srcs.cf && !M.srcs.m365;
+  const kinds = new Set(M.list.map((a) => a.kind || "outlook"));
+  const showKindFilter = kinds.size >= 2 || M.srcs.cf || M.srcs.m365;
+  // 来源筛选条被隐藏时回到「全部」，避免筛过之后来源消失、列表锁死在空态
+  if (!showKindFilter && M.kindFilter !== "all") M.kindFilter = "all";
+  const kindLabel = {
+    all: t("mb.kindFilter.all"),
+    outlook: t("mb.kindFilter.outlook"),
+    cf: t("mb.kindFilter.cf"),
+    m365: t("mb.kindFilter.m365"),
+  };
+  const selCount = { m365: 0, cf: 0, outlook: 0 };
+  for (const e of M.sel) {
+    const a = M.list.find((x) => x.email === e);
+    const k = (a && a.kind) || "outlook";
+    if (k in selCount) selCount[k] += 1;
+  }
+  const selSources = [["m365", t("mb.m365Kind")], ["cf", t("mb.cfKind")], ["outlook", t("mb.outlookKind")]]
+    .filter(([k]) => selCount[k] > 0)
+    .map(([k, label]) => `${label} ×${selCount[k]}`)
+    .join(" · ");
   const progress = b.running
     ? `<div class="prog">
          <div class="prog-bar"><i style="width:${b.total ? Math.round((b.done / b.total) * 100) : 0}%"></i></div>
@@ -118,6 +160,11 @@ export function mboxPage() {
           .map((f) => `<button class="${M.filter === f ? "on" : ""}" aria-pressed="${M.filter === f}" click="actions.mboxFilter('${f}')">${tr("mb.filter", f)}</button>`)
           .join("")}
       </div>
+      ${showKindFilter
+        ? `<div class="seg mb-kind-filter" role="group" aria-label="${esc(t("mb.kindFilter.all"))}">
+        ${["all", "outlook", "cf", "m365"].map((k) => `<button class="${M.kindFilter === k ? "on" : ""}" aria-pressed="${M.kindFilter === k}" click="actions.mboxKindFilter('${k}')">${esc(kindLabel[k])}</button>`).join("")}
+      </div>`
+        : ""}
     </div>
     <dl class="mail-overview">
       <div><dt>${t("mb.overview.total")}</dt><dd>${M.list.length}</dd></div>
@@ -127,14 +174,18 @@ export function mboxPage() {
     </dl>
     <section class="toolbar">
       <button class="btn p" click="actions.mboxImport()" ${b.running ? "disabled" : ""}>${ic("import", 15)} ${t("mb.import")}</button>
-      <select class="sel mb-cf-n" id="mb-cf-n" title="${esc(t("mb.cfCount"))}" aria-label="${esc(t("mb.cfCount"))}" ${b.running ? "disabled" : ""}>
+      <label class="src-wrap" title="${esc(t("mb.srcTip"))}" style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--label-2)">
+        <span>${t("mb.srcLabel")}</span>
+        <select class="sel" id="mb-src" aria-label="${esc(t("mb.srcLabel"))}" ${noSrc ? "disabled" : ""}>
+          ${noSrc ? `<option value="" selected>${esc(t("mb.srcUnset"))}</option>` : ""}
+          <option value="cf" ${M.src === "cf" ? "selected" : ""} ${M.srcs.cf ? "" : "disabled"}>${esc(t("mb.srcCf"))}${M.srcs.cf ? "" : ` · ${esc(t("mb.srcUnset"))}`}</option>
+          <option value="m365" ${M.src === "m365" ? "selected" : ""} ${M.srcs.m365 ? "" : "disabled"}>${esc(t("mb.srcM365"))}${M.srcs.m365 ? (M.srcs.m365LoggedIn ? "" : ` · ${esc(t("mb.srcNoLogin"))}`) : ` · ${esc(t("mb.srcUnset"))}`}</option>
+        </select>
+      </label>
+      <select class="sel" id="mb-src-n" aria-label="${esc(t("mb.createBtn"))}" ${b.running ? "disabled" : ""}>
         ${[1, 3, 5, 10].map((n) => `<option value="${n}">${n}</option>`).join("")}
       </select>
-      <button class="btn" click="actions.mboxCfCreate()" title="${esc(t("mb.cfCreateTip"))}" ${b.running ? "disabled" : ""}>${ic("mail", 14)} ${t("mb.cfCreate")}</button>
-      <select class="sel mb-m365-n" id="mb-m365-n" title="${esc(t("mb.m365Count"))}" aria-label="${esc(t("mb.m365Count"))}" ${b.running ? "disabled" : ""}>
-        ${[1, 3, 5, 10].map((n) => `<option value="${n}">${n}</option>`).join("")}
-      </select>
-      <button class="btn" click="actions.mboxM365Create()" title="${esc(t("mb.m365CreateTip"))}" ${b.running ? "disabled" : ""}>${ic("mail", 14)} ${t("mb.m365Create")}</button>
+      <button class="btn" click="actions.mboxCreate()" title="${esc(noSrc ? t("mb.srcNoneTip") : t("mb.createBtn"))}" ${b.running || noSrc ? "disabled" : ""}>${ic("mail", 14)} ${t("mb.createBtn")}</button>
       <button class="btn" click="actions.mboxExport()" ${M.list.length && !b.running ? "" : "disabled"}>${ic("export", 14)} ${t("mb.export")}</button>
       <label class="conc-wrap" title="${esc(t("mb.concTip"))}">
         <span>${esc(t("mb.conc"))}</span>
@@ -143,6 +194,7 @@ export function mboxPage() {
         </select>
       </label>
       <button class="btn" click="actions.mboxVerify()" ${!verifyN || b.running ? "disabled" : ""}>${ic("play", 14)} ${t("mb.verify")}${verifyN ? ` (${verifyN})` : ""}</button>
+      ${selSources ? `<span class="mb-srcsum" style="font-size:12px;color:var(--label-3)">${esc(t("mb.selSources", { list: selSources }))}</span>` : ""}
       <button class="btn" click="actions.mboxStop()" ${b.running ? "" : "disabled"}>${ic("power", 14)} ${t("mb.stop")}</button>
       <span class="spacer"></span>
       <button class="btn d" click="actions.mboxDelete()" ${M.sel.size && !b.running ? "" : "disabled"}>${ic("trash", 14)} ${t("mb.delete")}${M.sel.size ? ` (${M.sel.size})` : ""}</button>
@@ -218,6 +270,12 @@ export function mboxFilter(f) {
   rerender();
 }
 
+/** 来源筛选（all | outlook | cf | m365），与状态筛选是「且」关系。 */
+export function mboxKindFilter(k) {
+  M.kindFilter = k;
+  rerender();
+}
+
 export function mboxToggle(email, on) {
   if (on) M.sel.add(email);
   else M.sel.delete(email);
@@ -259,10 +317,9 @@ export async function mboxImport() {
   }
 }
 
-/** 现场建临时地址（cloudflare_temp_email）并直接入库：建完就能勾选去跑注册。 */
-export async function mboxCfCreate() {
+/** 内部：现场建 cf 临时地址（cloudflare_temp_email）并直接入库。 */
+async function createCf(n) {
   if (M.batch.running) return;
-  const n = Number(document.querySelector("#mb-cf-n")?.value || 1) || 1;
   try {
     const r = await invoke("cf_create", { count: n });
     const created = (r && r.created) || [];
@@ -281,10 +338,9 @@ export async function mboxCfCreate() {
   }
 }
 
-/** 现场生成 M365 catch-all 地址（kind="m365"）并直接入库：凭据在设置页的源级配置里，行只是地址标签。 */
-export async function mboxM365Create() {
+/** 内部：现场生成 M365 catch-all 地址（kind="m365"）并直接入库 —— 凭据是源级配置，行只是地址标签。 */
+async function createM365(n) {
   if (M.batch.running) return;
-  const n = Number(document.querySelector("#mb-m365-n")?.value || 1) || 1;
   try {
     const r = await invoke("m365_addr_create", { count: n });
     const created = (r && r.created) || [];
@@ -295,6 +351,28 @@ export async function mboxM365Create() {
   } catch (e) {
     toast(String(e).replace(/^[a-z_]+:/, ""), "err");
   }
+}
+
+/** 切换「生成地址」的来源：立刻记住并持久化，避免下一次 render 把下拉选择刷回旧值。 */
+export function mboxSetSrc(src) {
+  if (!src) return;
+  M.src = src;
+  M.srcTouched = true;
+  invoke("set_mail_source", { source: src }).catch(() => {});
+}
+
+/** 「生成地址」：按工具栏选中的邮箱源建址。选择会持久化（set_mail_source），下次启动自动恢复。 */
+export async function mboxCreate() {
+  const el = document.querySelector("#mb-src");
+  const src = (el && el.value) || M.src || "";
+  const n = Number(document.querySelector("#mb-src-n")?.value || 1) || 1;
+  if (!src) {
+    toast(t("mb.srcNoneTip"), "warn");
+    return;
+  }
+  mboxSetSrc(src);
+  if (src === "m365") await createM365(n);
+  else await createCf(n);
 }
 
 export async function mboxRemove(email) {
