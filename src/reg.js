@@ -28,9 +28,15 @@ const CARD_LOGS = 3;
 const EARLY_EVENT_TTL = 120_000;
 const MAX_EARLY_FLOWS = 10;
 
+// 自动取链的等待预算按墙钟算：90 秒是真实截止时间，不是"30 次 × 3 秒"的推断值。
+const LINK_WAIT_MS = 90_000;
 const LINK_POLL_MS = 3000;
-const LINK_POLL_TRIES = 30;
 const LINK_MAX_AUTO = 3;
+// 剩余时间不足这个额度就不再发起新查询：单次 Graph 调用最长 25s，发起了就可能越过截止点。
+const LINK_MIN_ROUND_MS = 5000;
+// 转手动粘贴后，后台继续等邮件的节奏与上限：邮件晚到时自动填入，用户不必手贴。
+const LINK_BG_POLL_MS = 5000;
+const LINK_BG_MAX_MS = 600_000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const shortMail = (s) => String(s || "").split("@")[0] || "";
@@ -114,6 +120,12 @@ export function regStart(flow, mode, provider, batchEmail = "") {
     linkAuto: 0,
     submittedAt: 0,
     linkBusy: false,
+    // 取链兜底：linkBg=后台轮询中，linkStop=让在跑的轮询尽快收口，
+    // pushedLink=已下发的链接（去重），linkLastFail=上次报错文案（日志去重）。
+    linkBg: false,
+    linkStop: false,
+    pushedLink: "",
+    linkLastFail: "",
   });
   pushLog(sessions.get(flow), "info", "connected", provider);
   render();
@@ -163,6 +175,7 @@ export function regEvent(ev) {
       s.failed = ev.ok === false;
       s.phase = s.failed ? "failed" : "done";
       s.note = s.failed ? String(ev.error || "") : "";
+      clearLinkAsk(s.flow);
       terminate(s.flow, "result", { ok: !s.failed, error: s.note });
       break;
     case "ready":
@@ -174,6 +187,9 @@ export function regEvent(ev) {
     case "phase":
       s.phase = ev.phase;
       if (ev.phase === "unsupported") s.failed = true;
+      // 一旦离开"等邮件"（链接已打开 / 已回授权页）就立刻收口，
+      // 否则后台兜底迟到的链接会把驱动又拽回打开链接那一步。
+      if (ev.phase !== "await-email") s.linkStop = true;
       break;
     case "note":
       s.note = !ev.code || ev.code === "clear" ? "" : tr("reg.note", ev.code, { a: ev.a });
@@ -197,6 +213,7 @@ export function regEvent(ev) {
         s.closed = true;
         s.note = "";
         pushLog(s, "warn", "windowClosed");
+        clearLinkAsk(s.flow);
         terminate(s.flow, "closed");
       }
       break;
@@ -207,8 +224,13 @@ export function regEvent(ev) {
 }
 
 function pushLog(s, level, code, a, b) {
+  pushLogV(s, level, code, { a: a || "", b: b || "" });
+}
+
+/** 需要 3 个以上占位符的日志走这里（例如取链的"已等 / 还剩 / 第几次"）。 */
+function pushLogV(s, level, code, params) {
   if (!s) return;
-  const text = tr("reg.log", code, { a: a || "", b: b || "" });
+  const text = tr("reg.log", code, params || {});
   s.logs.push({ level, text, at: nowLabel(), ts: Date.now(), mail: shortMail(mailOf(s)) });
   if (s.logs.length > MAX_LOGS) s.logs.splice(0, s.logs.length - MAX_LOGS);
 }
@@ -241,69 +263,183 @@ function isCredentialError(msg) {
   return /invalid_grant|AADSTS70000|AADSTS70008|AADSTS50173|AADSTS7000215/i.test(String(msg || ""));
 }
 
+/** 同一条错误只在首次（或文案变化）记一次，避免 90 秒里刷满重复告警。 */
+function logLinkFail(s, msg) {
+  if (!s || !msg || s.linkLastFail === msg) return;
+  s.linkLastFail = msg;
+  pushLog(s, "warn", "fetchLinkErr", msg);
+  render();
+}
+
+/**
+ * 一次取链查询：到点就放弃等待，返回 { value } / { error } / { timedOut }。
+ * 单次 Graph 调用最长 25s，不能让它把整个等待窗口拖过截止时间。
+ */
+function linkQuery(email, sinceMs, flow, waitMs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(v);
+    };
+    const timer = setTimeout(() => done({ timedOut: true }), Math.max(1, waitMs));
+    let call;
+    try {
+      call = invoke("reg_fetch_link", { email, limit: 15, since: sinceMs, flow });
+    } catch (e) {
+      done({ error: stripErr(e) });
+      return;
+    }
+    Promise.resolve(call).then(
+      (value) => done({ value }),
+      (e) => done({ error: stripErr(e) }),
+    );
+  });
+}
+
+/**
+ * 取链轮询核心：主窗口与"手动框背后的兜底"共用同一套逻辑。
+ * 瞬时失败（网络 / 5xx / 超时）只记一条日志并继续等，只有凭据失效才终止流程。
+ * 预算按墙钟 deadline 算，剩余不足一轮就不再发起新查询。
+ */
+async function linkPollCore(s, { deadline, interval, background }) {
+  const email = s.signupEmail || "";
+  const sinceMs = (s.submittedAt || s.startedAt || Date.now()) - 60_000;
+  const beganAt = Date.now();
+  s.linkStop = false;
+  s.linkBusy = true;
+  if (background) s.linkBg = true;
+  let tries = 0;
+  let fails = 0;
+  let fail = "";
+  let info = "";
+  try {
+    while (!s.linkStop && !s.closed && !s.finished && sessions.get(s.flow) === s && s.phase === "await-email") {
+      const remaining = deadline - Date.now();
+      if (remaining <= LINK_MIN_ROUND_MS) break;
+      tries += 1;
+      const r = await linkQuery(email, sinceMs, s.flow, remaining);
+      if (s.linkStop || s.closed || sessions.get(s.flow) !== s) break;
+      if (r.timedOut) {
+        pushLog(s, "info", "fetchLinkSlow");
+        render();
+        break;
+      }
+      if (r.error) {
+        if (isCredentialError(r.error)) {
+          toast(t("reg.linkDead"), "err", r.error);
+          clearLinkAsk(s.flow);
+          terminate(s.flow, "skipped");
+          return { link: "", fail: r.error, info, dead: true };
+        }
+        fails += 1;
+        fail = r.error;
+        logLinkFail(s, r.error);
+      } else {
+        const links = (r.value && r.value.links) || [];
+        if (links.length) return { link: pickLink(links), fail, info };
+        const n = Number(r.value && r.value.scanned) || 0;
+        const subj = String((r.value && r.value.newestSubject) || "").trim();
+        info = subj ? t("reg.linkNewest", { n, s: subj }) : t("reg.linkEmptyBox", { n });
+        fail = "";
+        s.linkLastFail = "";
+      }
+      // 后台兜底不刷屏：只在取到 / 放弃时留痕，正常轮询不写日志。
+      if (!background) {
+        const elapsed = Math.round((Date.now() - beganAt) / 1000);
+        const left = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+        if (fails) pushLogV(s, "info", "fetchLinkPollingRetry", { a: elapsed, b: left, c: tries, d: fails });
+        else pushLogV(s, "info", "fetchLinkPolling", { a: elapsed, b: left, c: tries });
+        render();
+      }
+      const wait = Math.min(interval, deadline - Date.now());
+      if (wait <= 0) break;
+      await sleep(wait);
+    }
+  } finally {
+    s.linkBusy = false;
+    if (background) s.linkBg = false;
+  }
+  return { link: "", fail, info };
+}
+
+/** 下发链接给驱动；同一链接只下发一次（后台兜底和手动提交可能撞车）。 */
+async function pushLink(s, link) {
+  if (!s || !link) return false;
+  // 已经下发过同一链接就不再重复：驱动收到 input 会立刻回到"打开链接"，
+  // 重复下发会把已经走到授权页的流程拽回上一步。
+  if (s.pushedLink === link) return false;
+  s.pushedLink = link;
+  try {
+    await invoke("reg_input", { flow: s.flow, ask: "link", value: link });
+    pushLog(s, "ok", "fetchLinkFound", link);
+    clearLinkAsk(s.flow);
+    // 只有真正下发成功才计数：自动取链达上限后转为纯手动。
+    s.linkAuto += 1;
+    return true;
+  } catch (e) {
+    // 下发失败（窗口已关等）：保留粘贴框，让用户还能手动补一次；
+    // 同一链接不会自动重试，避免弹窗反复开关。
+    pushLog(s, "warn", "fetchLinkPushFail", stripErr(e));
+    startManualLink(s, "pushFail");
+    return false;
+  } finally {
+    render();
+  }
+}
+
+/** 主窗口：等满 90 秒墙钟；取不到就转手动，同时保留后台兜底。 */
 async function autoFetchLink(s) {
   if (!s || s.linkBusy) return;
   const email = s.signupEmail;
   if (!email) return startManualLink(s, "noEmail");
   if (s.linkAuto >= LINK_MAX_AUTO) return startManualLink(s, "loop");
 
-  s.linkBusy = true;
   pushLog(s, "info", "fetchLinkStart", email);
   render();
 
-  const anchor = s.submittedAt || s.startedAt || Date.now();
-  const sinceMs = anchor - 60_000;
-
-  let link = "";
-  let fail = "";
-  let info = "";
-  for (let i = 0; i < LINK_POLL_TRIES && !s.closed; i++) {
-    try {
-      const r = await invoke("reg_fetch_link", { email, limit: 15, since: sinceMs, flow: s.flow });
-      const links = (r && r.links) || [];
-      if (links.length) {
-        link = pickLink(links);
-        break;
-      }
-      const n = Number(r && r.scanned) || 0;
-      const subj = String((r && r.newestSubject) || "").trim();
-      info = subj ? t("reg.linkNewest", { n, s: subj }) : t("reg.linkEmptyBox", { n });
-      fail = "";
-    } catch (e) {
-      fail = stripErr(e);
-      pushLog(s, "warn", "fetchLinkErr", fail);
-      if (isCredentialError(fail)) {
-        toast(t("reg.linkDead"), "err", fail);
-        terminate(s.flow, "skipped");
-        return;
-      }
-      break;
-    }
-    pushLog(s, "info", "fetchLinkPolling", String(Math.round(((i + 1) * LINK_POLL_MS) / 1000)), String(i + 1));
-    render();
-    await sleep(LINK_POLL_MS);
-  }
-  s.linkBusy = false;
-
-  if (!link) return startManualLink(s, fail || info || "timeout");
-
-  s.linkAuto += 1;
-  try {
-    await invoke("reg_input", { flow: s.flow, ask: "link", value: link });
-    pushLog(s, "ok", "fetchLinkFound", link);
-  } catch (e) {
-    pushLog(s, "warn", "fetchLinkPushFail", stripErr(e));
-    startManualLink(s, "pushFail");
-  }
-  render();
+  const { link, fail, info, dead } = await linkPollCore(s, {
+    deadline: Date.now() + LINK_WAIT_MS,
+    interval: LINK_POLL_MS,
+    background: false,
+  });
+  if (dead) return;
+  if (link) return pushLink(s, link);
+  // 流程已收口或已走过等邮件阶段，就不要再用弹窗打扰用户。
+  if (s.linkStop || s.closed || s.finished || sessions.get(s.flow) !== s || s.phase !== "await-email") return;
+  startManualLink(s, fail || info || "timeout");
 }
 
+/** 转人工：弹粘贴框，同时让后台继续等邮件（取到会自动填入并提交）。 */
 function startManualLink(s, reason) {
   if (!s) return;
-  if (modal && modalFlow === s.flow && modalKind === "link") return;
   if (reason) pushLog(s, "warn", "fetchLinkManual", reason);
   render();
-  enqueueAsk(s.flow, "link");
+  if (!(modal && modalFlow === s.flow && modalKind === "link")) enqueueAsk(s.flow, "link");
+  watchLink(s).catch((e) => console.warn("[reg] 后台取链兜底异常：", e));
+}
+
+/** 手动框开着的时候后台继续等邮件；链接晚到时自动填入并关掉弹窗。 */
+async function watchLink(s) {
+  if (!s || !s.signupEmail || s.linkBusy || s.linkBg || s.closed || s.finished) return;
+  if (sessions.get(s.flow) !== s || s.phase !== "await-email") return;
+  pushLog(s, "info", "fetchLinkBgStart");
+  render();
+  const { link } = await linkPollCore(s, {
+    deadline: Date.now() + LINK_BG_MAX_MS,
+    interval: LINK_BG_POLL_MS,
+    background: true,
+  });
+  // linkStop = 用户已经手贴过 / 流程已走过等邮件阶段：静默收口，别再说"后台等超时"。
+  if (s.closed || s.finished || s.linkStop || sessions.get(s.flow) !== s || s.phase !== "await-email") return;
+  if (!link) {
+    pushLog(s, "warn", "fetchLinkBgGiveup");
+    render();
+    return;
+  }
+  await pushLink(s, link);
 }
 
 function modeLabel(mode) {
@@ -469,6 +605,18 @@ function closeModal() {
   modalFlow = null;
 }
 
+/**
+ * 链接已经有了结果（自动取到 / 流程结束）：撤掉该流程还排着队、或正开着的手动粘贴请求，
+ * 免得自动填入之后又弹一个"请手动粘贴"的空框。
+ */
+function clearLinkAsk(flow) {
+  const before = modalQueue.length;
+  modalQueue = modalQueue.filter((q) => !(q.flow === flow && q.kind === "link"));
+  const showing = !!modal && modalFlow === flow && modalKind === "link";
+  if (showing) closeModal();
+  if (showing || modalQueue.length !== before) pumpModal();
+}
+
 /** 单例 modal 的排队：并发任务的“人工填单”请求按序弹出。 */
 function enqueueAsk(flow, kind) {
   if (modal && modalFlow === flow && modalKind === kind) return;
@@ -563,7 +711,10 @@ function openAsk(flow, kind) {
             + field("reg-name", t("reg.ask.signup.name"), "text", t("reg.ask.signup.namePh"))
             + field("reg-email", t("reg.ask.signup.email"), "email", t("reg.ask.signup.emailPh"))
             + field("reg-pw", t("reg.ask.signup.password"), "password", t("reg.ask.signup.passwordPh"))
-          : `<label class="fld">
+          : `<div class="importrow">
+               <button type="button" class="btn sm reg-paste-btn">${ic("import", 13)} ${esc(t("reg.ask.link.paste"))}</button>
+             </div>
+             <label class="fld">
                <span>${esc(t("reg.ask.link.ph"))}</span>
                <textarea id="reg-link" class="inp" rows="3"
                  placeholder="${esc(t("reg.ask.link.ph"))}" spellcheck="false"></textarea>
@@ -586,6 +737,31 @@ function openAsk(flow, kind) {
   }
 
   const err = mask.querySelector(".errline");
+
+  // 邮件晚到时手贴很烦：能读剪贴板就一键填入；读不到就让用户按 Ctrl+V，不算错误。
+  const pasteBtn = mask.querySelector(".reg-paste-btn");
+  if (pasteBtn) {
+    if (typeof navigator === "undefined" || !navigator.clipboard || !navigator.clipboard.readText) {
+      pasteBtn.hidden = true;
+    } else {
+      pasteBtn.addEventListener("click", async () => {
+        const ta = mask.querySelector("#reg-link");
+        try {
+          const text = String((await navigator.clipboard.readText()) || "").trim();
+          if (ta && text) {
+            ta.value = text;
+            err.textContent = "";
+          } else {
+            err.textContent = t("reg.err.clipboard");
+          }
+        } catch (e) {
+          err.textContent = t("reg.err.clipboard");
+        }
+        if (ta) ta.focus();
+      });
+    }
+  }
+
   const close = () => {
     closeModal();
     pumpModal();
@@ -615,6 +791,9 @@ function openAsk(flow, kind) {
       const link = mask.querySelector("#reg-link").value.trim();
       if (!/^https?:\/\//i.test(link)) return (err.textContent = t("reg.err.link"));
       s.linkAuto = LINK_MAX_AUTO;
+      // 手贴的链接算已下发：停掉后台兜底，避免同一份链接被再下发一次。
+      s.pushedLink = link;
+      s.linkStop = true;
       value = link;
     }
     const go = mask.querySelector(".reg-go");
